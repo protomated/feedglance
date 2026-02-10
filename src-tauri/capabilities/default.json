@@ -6,6 +6,8 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "store:default"
+    "store:default",
+    "notification:default",
+    "core:event:default"
   ]
 }
