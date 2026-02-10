@@ -5,6 +5,7 @@ import { Onboarding } from "./components/Onboarding";
 import { Settings } from "./components/Settings";
 import { ConnectionStatus } from "./components/ConnectionStatus";
 import { NotificationFeed } from "./components/NotificationFeed";
+import { ToastContainer } from "./components/Toast";
 import "./App.css";
 
 type View = "feed" | "settings";
@@ -124,6 +125,9 @@ function App() {
 
       {/* Feed */}
       <NotificationFeed />
+
+      {/* Toast notifications */}
+      <ToastContainer />
     </div>
   );
 }

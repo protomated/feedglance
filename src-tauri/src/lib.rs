@@ -1,10 +1,12 @@
 mod activities;
+mod cache;
 mod polling;
 mod youtrack;
 
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+use cache::SharedProjectCache;
 use polling::{FocusState, PollingState, SharedPollingState};
 use youtrack::YouTrackClient;
 
@@ -105,9 +107,62 @@ async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result
     Ok(count)
 }
 
+// --- Epic 3: Quick Actions commands ---
+
+#[tauri::command]
+async fn execute_command(
+    url: String,
+    token: String,
+    issue_id: String,
+    command: String,
+) -> Result<youtrack::CommandResult, String> {
+    let client = YouTrackClient::new(&url, &token);
+    client
+        .post_command(&issue_id, &command)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn post_comment(
+    url: String,
+    token: String,
+    issue_id: String,
+    text: String,
+) -> Result<youtrack::CommandResult, String> {
+    let client = YouTrackClient::new(&url, &token);
+    client
+        .post_comment(&issue_id, &text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_project_states(
+    url: String,
+    token: String,
+    project_id: String,
+    project_cache: tauri::State<'_, SharedProjectCache>,
+) -> Result<Vec<youtrack::StateBundleElement>, String> {
+    let client = YouTrackClient::new(&url, &token);
+    cache::fetch_project_states(&project_cache, &client, &project_id).await
+}
+
+#[tauri::command]
+async fn get_project_team(
+    url: String,
+    token: String,
+    project_id: String,
+    project_cache: tauri::State<'_, SharedProjectCache>,
+) -> Result<Vec<youtrack::TeamMember>, String> {
+    let client = YouTrackClient::new(&url, &token);
+    cache::fetch_project_team(&project_cache, &client, &project_id).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let polling_state: SharedPollingState = Arc::new(RwLock::new(PollingState::new()));
+    let project_cache: SharedProjectCache = Arc::new(RwLock::new(cache::ProjectCache::new()));
     let cancel = Arc::new(Mutex::new(()));
 
     tauri::Builder::default()
@@ -115,6 +170,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .manage(polling_state.clone())
+        .manage(project_cache)
         .setup(move |app| {
             let handle = app.handle().clone();
             let state = polling_state.clone();
@@ -133,6 +189,10 @@ pub fn run() {
             mark_all_read,
             get_read_ids,
             get_unread_count,
+            execute_command,
+            post_comment,
+            get_project_states,
+            get_project_team,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
