@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useAuthStore } from "../stores/auth";
 
 export function Settings({ onClose }: { onClose: () => void }) {
@@ -14,6 +15,24 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [newToken, setNewToken] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [autostart, setAutostart] = useState(false);
+
+  useEffect(() => {
+    isEnabled().then(setAutostart).catch(() => {});
+  }, []);
+
+  const handleAutostartToggle = async () => {
+    try {
+      if (autostart) {
+        await disable();
+      } else {
+        await enable();
+      }
+      setAutostart(!autostart);
+    } catch {
+      // Silently ignore if autostart toggle fails
+    }
+  };
 
   const handleTestConnection = async () => {
     setTesting(true);
@@ -131,6 +150,31 @@ export function Settings({ onClose }: { onClose: () => void }) {
             </form>
           )}
         </div>
+      </div>
+
+      {/* Preferences */}
+      <div className="mb-6">
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+          Preferences
+        </h3>
+        <label className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer">
+          <span className="text-sm text-gray-700 dark:text-gray-300">Launch at startup</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autostart}
+            onClick={handleAutostartToggle}
+            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+              autostart ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"
+            }`}
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                autostart ? "translate-x-4" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </label>
       </div>
 
       {/* Danger zone */}

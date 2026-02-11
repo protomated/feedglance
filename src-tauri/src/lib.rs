@@ -1,6 +1,7 @@
 mod activities;
 mod cache;
 mod polling;
+mod tray;
 mod youtrack;
 
 use std::sync::Arc;
@@ -70,21 +71,30 @@ async fn get_activities(
 
 #[tauri::command]
 async fn mark_activity_read(
+    app: tauri::AppHandle,
     state: tauri::State<'_, SharedPollingState>,
     activity_id: String,
 ) -> Result<(), String> {
     let mut s = state.write().await;
     s.read_ids.insert(activity_id);
+    let unread = s.activities.iter().filter(|a| !s.read_ids.contains(&a.id)).count() as u32;
+    drop(s);
+    tray::update_tray_badge(&app, unread);
     Ok(())
 }
 
 #[tauri::command]
-async fn mark_all_read(state: tauri::State<'_, SharedPollingState>) -> Result<(), String> {
+async fn mark_all_read(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SharedPollingState>,
+) -> Result<(), String> {
     let mut s = state.write().await;
     let all_ids: Vec<String> = s.activities.iter().map(|a| a.id.clone()).collect();
     for id in all_ids {
         s.read_ids.insert(id);
     }
+    drop(s);
+    tray::update_tray_badge(&app, 0);
     Ok(())
 }
 
@@ -169,14 +179,34 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_positioner::init())
         .manage(polling_state.clone())
         .manage(project_cache)
         .setup(move |app| {
+            // Hide from macOS dock — tray-only app
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Set up system tray
+            tray::setup_tray(app.handle())?;
+
+            // Start polling loop
             let handle = app.handle().clone();
             let state = polling_state.clone();
             let cancel = cancel.clone();
             polling::start_polling_loop(handle, state, cancel);
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Hide window instead of closing — tray app stays alive
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             validate_connection,

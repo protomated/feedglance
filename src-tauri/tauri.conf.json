@@ -12,11 +12,15 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "YouTrackd",
         "width": 380,
         "height": 600,
-        "resizable": true,
-        "decorations": true
+        "resizable": false,
+        "decorations": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {

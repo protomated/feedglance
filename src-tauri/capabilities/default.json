@@ -8,6 +8,9 @@
     "opener:default",
     "store:default",
     "notification:default",
-    "core:event:default"
+    "core:event:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
   ]
 }

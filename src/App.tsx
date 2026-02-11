@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "./stores/auth";
 import { useNotificationStore, countUnread } from "./stores/notifications";
 import { Onboarding } from "./components/Onboarding";
@@ -66,6 +68,8 @@ function App() {
     };
 
     const handleBlur = () => {
+      // Hide window when it loses focus (close on outside click)
+      getCurrentWindow().hide();
       setFocusState("minimized");
       // After 5 minutes of being minimized, switch to idle
       idleTimer = setTimeout(() => {
@@ -82,6 +86,25 @@ function App() {
       clearTimeout(idleTimer);
     };
   }, [connectionStatus, setFocusState]);
+
+  // Listen for tray menu events
+  const markAllRead = useNotificationStore((s) => s.markAllRead);
+
+  useEffect(() => {
+    const unlisteners: Array<() => void> = [];
+
+    listen("tray-mark-all-read", () => {
+      markAllRead();
+    }).then((u) => unlisteners.push(u));
+
+    listen("tray-open-settings", () => {
+      setView("settings");
+    }).then((u) => unlisteners.push(u));
+
+    return () => {
+      unlisteners.forEach((u) => u());
+    };
+  }, [markAllRead]);
 
   if (!initialized) {
     return (
