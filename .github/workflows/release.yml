@@ -99,6 +99,8 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.release-please.outputs.tag_name }}
           releaseName: 'YouTrackd ${{ needs.release-please.outputs.tag_name }}'
@@ -108,4 +110,5 @@ jobs:
             > **macOS users:** This app is not code-signed. See the [README](https://github.com/protomated/youtrackd#running-unsigned-builds) for instructions on how to open unsigned apps.
           releaseDraft: true
           prerelease: true
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
