@@ -213,7 +213,7 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             // Set up system tray
-            tray::setup_tray(app.handle())?;
+            tray::setup_tray(app.handle(), polling_state.clone())?;
 
             // Global shortcut is registered from the frontend (allows user customization).
             // The Rust handler above will toggle the window for any registered shortcut.
