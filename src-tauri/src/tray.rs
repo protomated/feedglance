@@ -6,8 +6,10 @@ use tauri::{
 };
 use tauri_plugin_positioner::{Position, WindowExt};
 
+use crate::polling::SharedPollingState;
+
 /// Set up the system tray icon with a right-click context menu.
-pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+pub fn setup_tray(app: &AppHandle, state: SharedPollingState) -> tauri::Result<()> {
     let open_item = MenuItem::with_id(app, "open", "Open", true, None::<&str>)?;
     let mark_all_read =
         MenuItem::with_id(app, "mark_all_read", "Mark All as Read", true, None::<&str>)?;
@@ -25,12 +27,27 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("YouTrackd")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
+        .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => {
                 toggle_window(app);
             }
             "mark_all_read" => {
-                let _ = app.emit("tray-mark-all-read", ());
+                // Update backend state and tray badge directly so it works
+                // even when the webview window is hidden.
+                let state = state.clone();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut s = state.write().await;
+                    let all_ids: Vec<String> =
+                        s.activities.iter().map(|a| a.id.clone()).collect();
+                    for id in all_ids {
+                        s.read_ids.insert(id);
+                    }
+                    drop(s);
+                    update_tray_badge(&app, 0);
+                    // Also notify the frontend so its UI stays in sync
+                    let _ = app.emit("tray-mark-all-read", ());
+                });
             }
             "settings" => {
                 let _ = app.emit("tray-open-settings", ());
@@ -83,15 +100,17 @@ fn show_window(app: &AppHandle) {
 /// Update the tray icon badge (title text next to icon) and tooltip with unread count.
 pub fn update_tray_badge(app: &AppHandle, unread_count: u32) {
     if let Some(tray) = app.tray_by_id("youtrackd-tray") {
-        // set_title shows text next to the icon in the macOS menu bar
+        // set_title shows text next to the icon in the macOS menu bar.
+        // Use Some("") instead of None to clear the title — on macOS,
+        // set_title(None) can be a no-op that leaves the old text visible.
         let title = if unread_count == 0 {
-            None
+            String::new()
         } else if unread_count > 99 {
-            Some("99+".to_string())
+            "99+".to_string()
         } else {
-            Some(unread_count.to_string())
+            unread_count.to_string()
         };
-        let _ = tray.set_title(title.as_deref());
+        let _ = tray.set_title(Some(title.as_str()));
 
         // Also update tooltip for hover
         let tooltip = if unread_count == 0 {
