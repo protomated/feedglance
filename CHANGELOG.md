@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.0...youtrackd-v0.2.1) (2026-02-12)
+
+
+### Bug Fixes
+
+* **tray:** update badge and mark-all-read functionality ([f6f9ae7](https://github.com/protomated/youtrackd/commit/f6f9ae7a70e2a8efd903b29b3346f9e4423dcde2))
+
 ## [0.2.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.1.0...youtrackd-v0.2.0) (2026-02-12)
 
 
