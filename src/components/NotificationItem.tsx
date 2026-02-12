@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ActivityItem } from "../types/activity";
+import { useFilterStore } from "../stores/filters";
 import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
 import { AssignDropdown } from "./AssignDropdown";
@@ -113,7 +114,7 @@ function targetLabel(activity: ActivityItem): { label: string; id: string; type?
 }
 
 /** Resolve the issue's readable ID for commands — walk through target/issue refs. */
-function resolveIssueId(activity: ActivityItem): string | null {
+export function resolveIssueId(activity: ActivityItem): string | null {
   const t = activity.target;
   if (!t) return null;
 
@@ -137,15 +138,36 @@ function resolveProjectId(activity: ActivityItem): string | null {
 
 type ActiveAction = "reply" | "status" | "assign" | null;
 
+/** Check if text is likely longer than what 2 lines would show (~120 chars). */
+function isLikelyMultiLine(text: string): boolean {
+  return text.length > 120 || text.includes("\n");
+}
+
 interface Props {
   activity: ActivityItem;
   isRead: boolean;
+  isFocused?: boolean;
   onMarkRead: (id: string) => void;
   onOpenInBrowser?: (targetId: string, targetType?: string) => void;
 }
 
-export function NotificationItem({ activity, isRead, onMarkRead, onOpenInBrowser }: Props) {
+export function NotificationItem({ activity, isRead, isFocused, onMarkRead, onOpenInBrowser }: Props) {
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
+  const [commentExpanded, setCommentExpanded] = useState(false);
+  const muteIssue = useFilterStore((s) => s.muteIssue);
+
+  // Listen for keyboard-triggered actions
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail?.activityId === activity.id) {
+        const action = detail.action as ActiveAction;
+        if (action) setActiveAction((prev) => (prev === action ? null : action));
+      }
+    };
+    window.addEventListener("kb-action", handler);
+    return () => window.removeEventListener("kb-action", handler);
+  }, [activity.id]);
 
   const authorName = activity.author?.name || activity.author?.login || "Unknown";
   const avatarUrl = activity.author?.avatarUrl;
@@ -169,13 +191,13 @@ export function NotificationItem({ activity, isRead, onMarkRead, onOpenInBrowser
   };
 
   return (
-    <div>
+    <div data-activity-id={activity.id}>
       <div
         className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors ${
           isRead
             ? "opacity-60"
             : "bg-blue-50/50 dark:bg-blue-900/10 cursor-pointer"
-        }`}
+        }${isFocused ? " ring-2 ring-inset ring-blue-400 dark:ring-blue-500" : ""}`}
         onClick={() => {
           if (!isRead) onMarkRead(activity.id);
         }}
@@ -216,9 +238,26 @@ export function NotificationItem({ activity, isRead, onMarkRead, onOpenInBrowser
             {description}
           </p>
           {commentText && (
-            <p className="mt-0.5 text-gray-500 dark:text-gray-400 line-clamp-2 leading-snug">
-              {commentText}
-            </p>
+            <div className="mt-0.5">
+              <p
+                className={`text-gray-500 dark:text-gray-400 leading-snug whitespace-pre-wrap ${
+                  commentExpanded ? "" : "line-clamp-2"
+                }`}
+              >
+                {commentText}
+              </p>
+              {isLikelyMultiLine(commentText) && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setCommentExpanded((prev) => !prev);
+                  }}
+                  className="mt-0.5 text-blue-500 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 text-[10px] font-medium transition-colors"
+                >
+                  {commentExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -306,6 +345,22 @@ export function NotificationItem({ activity, isRead, onMarkRead, onOpenInBrowser
                     />
                   )}
                 </div>
+              )}
+
+              {/* Mute issue */}
+              {issueId && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    muteIssue(issueId);
+                  }}
+                  title="Mute this issue"
+                  className="p-1 rounded text-gray-400 hover:text-orange-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                >
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 2.81v10.38c0 .67-.81 1.01-1.28.53L3.63 10.63H.75a.75.75 0 0 1-.75-.75v-3.76a.75.75 0 0 1 .75-.75h2.88l3.09-3.09c.47-.47 1.28-.13 1.28.53ZM15.53 4.72a.75.75 0 0 0-1.06 0L12.78 6.4l-1.69-1.69a.75.75 0 0 0-1.06 1.06L11.72 7.5l-1.69 1.69a.75.75 0 1 0 1.06 1.06l1.69-1.69 1.69 1.69a.75.75 0 1 0 1.06-1.06L13.84 7.5l1.69-1.72a.75.75 0 0 0 0-1.06Z" />
+                  </svg>
+                </button>
               )}
             </div>
           )}

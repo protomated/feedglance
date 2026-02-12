@@ -67,13 +67,17 @@ export function AssignDropdown({ issueId, projectId, onClose }: Props) {
       }
     };
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
     };
     document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleEscape);
+    // Use capture phase so Escape closes dropdown before keyboard navigation hook runs
+    window.addEventListener("keydown", handleEscape, true);
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("keydown", handleEscape, true);
     };
   }, [onClose]);
 

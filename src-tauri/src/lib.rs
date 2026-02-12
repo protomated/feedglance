@@ -5,6 +5,7 @@ mod tray;
 mod youtrack;
 
 use std::sync::Arc;
+use tauri_plugin_global_shortcut::ShortcutState;
 use tokio::sync::{Mutex, RwLock};
 
 use cache::SharedProjectCache;
@@ -107,6 +108,16 @@ async fn get_read_ids(
 }
 
 #[tauri::command]
+async fn set_muted_issues(
+    state: tauri::State<'_, SharedPollingState>,
+    muted_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut s = state.write().await;
+    s.muted_issues = muted_ids.into_iter().collect();
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result<u32, String> {
     let s = state.read().await;
     let count = s
@@ -184,6 +195,16 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_positioner::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, _shortcut, event| {
+                    if event.state() == ShortcutState::Pressed {
+                        // Any registered shortcut toggles the main window
+                        tray::toggle_window(app);
+                    }
+                })
+                .build(),
+        )
         .manage(polling_state.clone())
         .manage(project_cache)
         .setup(move |app| {
@@ -193,6 +214,9 @@ pub fn run() {
 
             // Set up system tray
             tray::setup_tray(app.handle())?;
+
+            // Global shortcut is registered from the frontend (allows user customization).
+            // The Rust handler above will toggle the window for any registered shortcut.
 
             // Start polling loop
             let handle = app.handle().clone();
@@ -219,6 +243,7 @@ pub fn run() {
             mark_all_read,
             get_read_ids,
             get_unread_count,
+            set_muted_issues,
             execute_command,
             post_comment,
             get_project_states,

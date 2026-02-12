@@ -1,8 +1,48 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState, useRef, type FormEvent } from "react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useAuthStore } from "../stores/auth";
+import { DEFAULT_SHORTCUT } from "../App";
 
-export function Settings({ onClose }: { onClose: () => void }) {
+interface SettingsProps {
+  onClose: () => void;
+  globalShortcut: string;
+  onChangeShortcut: (shortcut: string) => Promise<void>;
+}
+
+/** Convert a KeyboardEvent into a Tauri-compatible shortcut string. */
+function keyEventToShortcut(e: KeyboardEvent): string | null {
+  const parts: string[] = [];
+  if (e.metaKey || e.ctrlKey) parts.push("CommandOrControl");
+  if (e.shiftKey) parts.push("Shift");
+  if (e.altKey) parts.push("Alt");
+
+  // Need at least one modifier
+  if (parts.length === 0) return null;
+
+  // Map the key code to a Tauri key name
+  const key = e.code;
+  if (key.startsWith("Key")) {
+    parts.push(key.slice(3)); // KeyY → Y
+  } else if (key.startsWith("Digit")) {
+    parts.push(key.slice(5)); // Digit1 → 1
+  } else if (key.startsWith("F") && /^F\d+$/.test(key)) {
+    parts.push(key); // F1, F2, etc.
+  } else {
+    // Skip pure modifier presses
+    return null;
+  }
+
+  return parts.join("+");
+}
+
+/** Format a shortcut string for display (e.g. "CommandOrControl+Shift+Y" → "Cmd+Shift+Y"). */
+function formatShortcut(shortcut: string): string {
+  return shortcut
+    .replace("CommandOrControl", navigator.platform.toUpperCase().includes("MAC") ? "Cmd" : "Ctrl")
+    .replace("Control", "Ctrl");
+}
+
+export function Settings({ onClose, globalShortcut, onChangeShortcut }: SettingsProps) {
   const user = useAuthStore((s) => s.user);
   const credentials = useAuthStore((s) => s.credentials);
   const disconnect = useAuthStore((s) => s.disconnect);
@@ -16,10 +56,43 @@ export function Settings({ onClose }: { onClose: () => void }) {
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
   const [autostart, setAutostart] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [shortcutError, setShortcutError] = useState<string | null>(null);
+  const recorderRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => {});
   }, []);
+
+  // Listen for key combo when recording
+  useEffect(() => {
+    if (!recording) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (e.key === "Escape") {
+        setRecording(false);
+        return;
+      }
+
+      const shortcut = keyEventToShortcut(e);
+      if (!shortcut) return; // Pure modifier press — keep recording
+
+      setRecording(false);
+      setShortcutError(null);
+
+      onChangeShortcut(shortcut).catch((err) => {
+        setShortcutError(
+          err instanceof Error ? err.message : "Failed to register shortcut"
+        );
+      });
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [recording, onChangeShortcut]);
 
   const handleAutostartToggle = async () => {
     try {
@@ -157,6 +230,51 @@ export function Settings({ onClose }: { onClose: () => void }) {
         <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
           Preferences
         </h3>
+
+        {/* Global shortcut */}
+        <div className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+          <div>
+            <span className="text-sm text-gray-700 dark:text-gray-300">Toggle window</span>
+            <p className="text-[10px] text-gray-400 mt-0.5">Global keyboard shortcut</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              ref={recorderRef}
+              onClick={() => {
+                setRecording(true);
+                setShortcutError(null);
+              }}
+              className={`px-2 py-1 rounded text-xs font-mono border transition-colors ${
+                recording
+                  ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 animate-pulse"
+                  : "border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-500"
+              }`}
+            >
+              {recording ? "Press keys..." : formatShortcut(globalShortcut)}
+            </button>
+            {globalShortcut !== DEFAULT_SHORTCUT && !recording && (
+              <button
+                onClick={() => {
+                  setShortcutError(null);
+                  onChangeShortcut(DEFAULT_SHORTCUT).catch((err) => {
+                    setShortcutError(
+                      err instanceof Error ? err.message : "Failed to reset"
+                    );
+                  });
+                }}
+                title="Reset to default"
+                className="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+        {shortcutError && (
+          <p className="px-3 mt-1 text-xs text-red-500">{shortcutError}</p>
+        )}
+
+        {/* Autostart */}
         <label className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer">
           <span className="text-sm text-gray-700 dark:text-gray-300">Launch at startup</span>
           <button

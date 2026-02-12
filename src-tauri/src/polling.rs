@@ -50,6 +50,8 @@ pub struct PollingState {
     pub activities: Vec<ActivityItem>,
     /// Read activity IDs.
     pub read_ids: HashSet<String>,
+    /// Muted issue IDs (readable IDs like "PROJ-123") — skip OS notifications for these.
+    pub muted_issues: HashSet<String>,
     /// Credentials for polling.
     pub url: String,
     pub token: String,
@@ -66,6 +68,7 @@ impl PollingState {
             seen_ids: HashSet::new(),
             activities: Vec::new(),
             read_ids: HashSet::new(),
+            muted_issues: HashSet::new(),
             url: String::new(),
             token: String::new(),
             consecutive_failures: 0,
@@ -124,6 +127,7 @@ pub fn start_polling_loop(
             let client = YouTrackClient::new(&url, &token);
 
             // Use watermark for subsequent polls, or 24h ago for initial load
+            let is_initial_load = watermark == 0;
             let start = if watermark > 0 {
                 watermark + 1 // +1 to avoid re-fetching the last seen activity
             } else {
@@ -137,6 +141,7 @@ pub fn start_polling_loop(
                     s.consecutive_failures = 0;
 
                     let mut new_count = 0u32;
+                    let mut non_muted_new_count = 0u32;
 
                     for activity in new_activities {
                         // Deduplication
@@ -149,9 +154,17 @@ pub fn start_polling_loop(
                             s.watermark = activity.timestamp;
                         }
 
+                        // Check if this activity's issue is muted
+                        let is_muted = resolve_issue_id_readable(&activity)
+                            .map(|id| s.muted_issues.contains(&id))
+                            .unwrap_or(false);
+
                         s.seen_ids.insert(activity.id.clone());
                         s.activities.insert(0, activity); // Newest first
                         new_count += 1;
+                        if !is_muted {
+                            non_muted_new_count += 1;
+                        }
                     }
 
                     // Prune old activities (keep last 500)
@@ -183,9 +196,10 @@ pub fn start_polling_loop(
                     // Emit event to frontend with the new activity count
                     let _ = app_handle.emit("activities-updated", new_count);
 
-                    // Send OS notification if there are new activities
-                    if new_count > 0 {
-                        send_os_notification(&app_handle, new_count);
+                    // Send OS notification only for non-muted new activities
+                    // Skip on initial load — those are catch-up activities, not genuinely new
+                    if non_muted_new_count > 0 && !is_initial_load {
+                        send_os_notification(&app_handle, non_muted_new_count);
                     }
                 }
                 Err(e) => {
@@ -211,6 +225,26 @@ pub fn start_polling_loop(
             }
         }
     });
+}
+
+/// Resolve the readable issue ID for an activity (e.g. "PROJ-123").
+/// Mirrors the frontend's `resolveIssueIdForFilter` logic.
+fn resolve_issue_id_readable(activity: &ActivityItem) -> Option<String> {
+    let t = activity.target.as_ref()?;
+    // Direct issue target (not a comment or article)
+    if let Some(ref id_readable) = t.id_readable {
+        let target_type = t.target_type.as_deref().unwrap_or("");
+        if target_type != "IssueComment" && target_type != "ArticleComment" && target_type != "Article" {
+            return Some(id_readable.clone());
+        }
+    }
+    // Parent issue
+    if let Some(ref issue) = t.issue {
+        if let Some(ref id_readable) = issue.id_readable {
+            return Some(id_readable.clone());
+        }
+    }
+    None
 }
 
 fn send_os_notification(app_handle: &AppHandle, count: u32) {

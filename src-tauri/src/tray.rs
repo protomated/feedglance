@@ -1,4 +1,5 @@
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
@@ -15,8 +16,11 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let menu = Menu::with_items(app, &[&open_item, &mark_all_read, &settings_item, &quit_item])?;
 
+    let icon = Image::from_bytes(include_bytes!("../icons/tray-icon@2x.png"))
+        .expect("failed to load tray icon");
+
     TrayIconBuilder::with_id("youtrackd-tray")
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(icon)
         .icon_as_template(true)
         .tooltip("YouTrackd")
         .menu(&menu)
@@ -56,7 +60,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// Toggle the main window visibility.
-fn toggle_window(app: &AppHandle) {
+pub fn toggle_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();

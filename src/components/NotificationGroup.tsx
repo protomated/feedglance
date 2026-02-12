@@ -4,6 +4,7 @@ import { NotificationItem } from "./NotificationItem";
 interface Props {
   group: GroupType;
   readIds: Set<string>;
+  focusedActivityId?: string | null;
   onMarkRead: (id: string) => void;
   onOpenInBrowser: (targetId: string, targetType?: string) => void;
 }
@@ -11,6 +12,7 @@ interface Props {
 export function NotificationGroup({
   group,
   readIds,
+  focusedActivityId,
   onMarkRead,
   onOpenInBrowser,
 }: Props) {
@@ -73,6 +75,7 @@ export function NotificationGroup({
               key={activity.id}
               activity={activity}
               isRead={readIds.has(activity.id)}
+              isFocused={focusedActivityId === activity.id}
               onMarkRead={onMarkRead}
               onOpenInBrowser={onOpenInBrowser}
             />
