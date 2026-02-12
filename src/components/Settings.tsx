@@ -1,4 +1,6 @@
 import { useEffect, useState, useRef, type FormEvent } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { useAuthStore } from "../stores/auth";
 import { DEFAULT_SHORTCUT } from "../App";
@@ -58,10 +60,12 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
   const [autostart, setAutostart] = useState(false);
   const [recording, setRecording] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
+  const [appVersion, setAppVersion] = useState<string>("");
   const recorderRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => {});
+    getVersion().then(setAppVersion).catch(() => {});
   }, []);
 
   // Listen for key combo when recording
@@ -293,6 +297,33 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
             />
           </button>
         </label>
+      </div>
+
+      {/* About */}
+      <div className="mb-6">
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+          About
+        </h3>
+        <div className="px-3 py-2 space-y-1">
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-gray-700 dark:text-gray-300">YouTrackd</span>
+            {appVersion && (
+              <span className="text-xs font-mono text-gray-500 dark:text-gray-400">v{appVersion}</span>
+            )}
+          </div>
+          <p className="text-xs text-gray-400">
+            YouTrack Cloud notifications in your system tray.
+          </p>
+          <p className="text-xs text-gray-400">
+            by{" "}
+            <button
+              onClick={() => openUrl("https://protomated.com")}
+              className="text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 underline underline-offset-2"
+            >
+              Protomated
+            </button>
+          </p>
+        </div>
       </div>
 
       {/* Danger zone */}
