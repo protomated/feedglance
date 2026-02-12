@@ -142,8 +142,8 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
   };
 
   return (
-    <div className="p-4">
-      <div className="flex items-center justify-between mb-4">
+    <div className="p-3">
+      <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
         <button
           onClick={onClose}
@@ -154,15 +154,15 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
       </div>
 
       {/* Account info */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+      <div className="mb-4">
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
           Account
         </h3>
-        <div className="flex items-center gap-3 p-3 rounded-lg bg-gray-100 dark:bg-gray-800">
+        <div className="flex items-center gap-2.5 p-2.5 rounded-lg bg-gray-100 dark:bg-gray-800">
           {user?.avatarUrl ? (
-            <img src={user.avatarUrl} alt={user.fullName} className="w-10 h-10 rounded-full" />
+            <img src={user.avatarUrl} alt={user.fullName} className="w-8 h-8 rounded-full" />
           ) : (
-            <div className="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center text-white font-semibold">
+            <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-semibold">
               {user?.fullName?.[0] || user?.login?.[0] || "?"}
             </div>
           )}
@@ -178,15 +178,15 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
       </div>
 
       {/* Connection */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+      <div className="mb-4">
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
           Connection
         </h3>
         <div className="space-y-2">
           <button
             onClick={handleTestConnection}
             disabled={testing}
-            className="w-full text-left px-3 py-2 rounded-md text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+            className="w-full text-left px-3 py-1.5 rounded-md text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
           >
             {testing ? "Testing..." : "Test connection"}
             {testResult === "success" && (
@@ -199,7 +199,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
 
           <button
             onClick={() => setShowUpdateToken(!showUpdateToken)}
-            className="w-full text-left px-3 py-2 rounded-md text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            className="w-full text-left px-3 py-1.5 rounded-md text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
           >
             Update token
           </button>
@@ -230,13 +230,13 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
       </div>
 
       {/* Preferences */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+      <div className="mb-4">
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
           Preferences
         </h3>
 
         {/* Global shortcut */}
-        <div className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+        <div className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
           <div>
             <span className="text-sm text-gray-700 dark:text-gray-300">Toggle window</span>
             <p className="text-[10px] text-gray-400 mt-0.5">Global keyboard shortcut</p>
@@ -279,7 +279,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
         )}
 
         {/* Autostart */}
-        <label className="flex items-center justify-between px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer">
+        <label className="flex items-center justify-between px-3 py-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer">
           <span className="text-sm text-gray-700 dark:text-gray-300">Launch at startup</span>
           <button
             type="button"
@@ -300,11 +300,11 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
       </div>
 
       {/* About */}
-      <div className="mb-6">
-        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">
+      <div className="mb-4">
+        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
           About
         </h3>
-        <div className="px-3 py-2 space-y-1">
+        <div className="px-3 py-1.5 space-y-0.5">
           <div className="flex items-center justify-between">
             <span className="text-sm text-gray-700 dark:text-gray-300">YouTrackd</span>
             {appVersion && (
@@ -328,12 +328,12 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
 
       {/* Danger zone */}
       <div>
-        <h3 className="text-xs font-medium text-red-500 uppercase tracking-wide mb-3">
+        <h3 className="text-xs font-medium text-red-500 uppercase tracking-wide mb-2">
           Danger Zone
         </h3>
         <button
           onClick={handleDisconnect}
-          className="w-full text-left px-3 py-2 rounded-md text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          className="w-full text-left px-3 py-1.5 rounded-md text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
         >
           Disconnect account
         </button>
