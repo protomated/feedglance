@@ -14,6 +14,8 @@ import { ConnectionStatus } from "./components/ConnectionStatus";
 import { NotificationFeed } from "./components/NotificationFeed";
 import { KeyboardShortcutHelp } from "./components/KeyboardShortcutHelp";
 import { ToastContainer } from "./components/Toast";
+import { UpdateBanner, checkForUpdate } from "./components/UpdateBanner";
+import type { Update } from "@tauri-apps/plugin-updater";
 import type { ActivityItem } from "./types/activity";
 import "./App.css";
 
@@ -91,6 +93,7 @@ function App() {
 
   const [globalShortcut, setGlobalShortcut] = useState(DEFAULT_SHORTCUT);
   const pollingStartedRef = useRef(false);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
 
   // Compute the flat (filtered) activity list for keyboard navigation
   const flatActivities = useMemo(() => {
@@ -241,6 +244,24 @@ function App() {
     }
   }, []);
 
+  // Check for updates on startup and every 6 hours
+  useEffect(() => {
+    const doCheck = () => {
+      checkForUpdate().then((update) => {
+        if (update) setAvailableUpdate(update);
+      });
+    };
+
+    // Delay initial check by 5s to avoid slowing down startup
+    const initial = setTimeout(doCheck, 5_000);
+    const interval = setInterval(doCheck, 6 * 60 * 60 * 1000);
+
+    return () => {
+      clearTimeout(initial);
+      clearInterval(interval);
+    };
+  }, []);
+
   // Initialize notification store and start polling when connected
   useEffect(() => {
     if (connectionStatus !== "connected" || !credentials) return;
@@ -328,6 +349,13 @@ function App() {
         onClose={() => setView("feed")}
         globalShortcut={globalShortcut}
         onChangeShortcut={updateGlobalShortcut}
+        availableUpdate={availableUpdate}
+        onUpdateDismissed={() => setAvailableUpdate(null)}
+        onCheckForUpdate={async () => {
+          const update = await checkForUpdate();
+          if (update) setAvailableUpdate(update);
+          return update;
+        }}
       />
     );
   }
@@ -362,6 +390,14 @@ function App() {
           </button>
         </div>
       </header>
+
+      {/* Update banner */}
+      {availableUpdate && (
+        <UpdateBanner
+          update={availableUpdate}
+          onDismiss={() => setAvailableUpdate(null)}
+        />
+      )}
 
       {/* Feed */}
       <NotificationFeed focusedActivityId={focusedActivityId} />

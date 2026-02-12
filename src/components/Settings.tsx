@@ -2,13 +2,18 @@ import { useEffect, useState, useRef, type FormEvent } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { useAuthStore } from "../stores/auth";
 import { DEFAULT_SHORTCUT } from "../App";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 interface SettingsProps {
   onClose: () => void;
   globalShortcut: string;
   onChangeShortcut: (shortcut: string) => Promise<void>;
+  availableUpdate: Update | null;
+  onUpdateDismissed: () => void;
+  onCheckForUpdate: () => Promise<Update | null>;
 }
 
 /** Convert a KeyboardEvent into a Tauri-compatible shortcut string. */
@@ -44,7 +49,7 @@ function formatShortcut(shortcut: string): string {
     .replace("Control", "Ctrl");
 }
 
-export function Settings({ onClose, globalShortcut, onChangeShortcut }: SettingsProps) {
+export function Settings({ onClose, globalShortcut, onChangeShortcut, availableUpdate, onUpdateDismissed, onCheckForUpdate }: SettingsProps) {
   const user = useAuthStore((s) => s.user);
   const credentials = useAuthStore((s) => s.credentials);
   const disconnect = useAuthStore((s) => s.disconnect);
@@ -61,6 +66,10 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
   const [recording, setRecording] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateCheckResult, setUpdateCheckResult] = useState<"up-to-date" | null>(null);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<string | null>(null);
   const recorderRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -323,6 +332,69 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut }: Settings
               Protomated
             </button>
           </p>
+        </div>
+
+        {/* Update section */}
+        <div className="px-3 py-1.5 mt-1">
+          {availableUpdate ? (
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-blue-600 dark:text-blue-400">
+                v{availableUpdate.version} available
+              </span>
+              {installingUpdate ? (
+                <span className="text-xs text-gray-400">{updateProgress}</span>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={async () => {
+                      setInstallingUpdate(true);
+                      setUpdateProgress("Downloading...");
+                      try {
+                        await availableUpdate.downloadAndInstall((event) => {
+                          if (event.event === "Started" && event.data.contentLength) {
+                            setUpdateProgress(`Downloading (${Math.round(event.data.contentLength / 1024)} KB)...`);
+                          } else if (event.event === "Finished") {
+                            setUpdateProgress("Restarting...");
+                          }
+                        });
+                        await relaunch();
+                      } catch {
+                        setInstallingUpdate(false);
+                        setUpdateProgress(null);
+                      }
+                    }}
+                    className="text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 px-2 py-0.5 rounded transition-colors"
+                  >
+                    Install update
+                  </button>
+                  <button
+                    onClick={onUpdateDismissed}
+                    className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                  >
+                    Later
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              onClick={async () => {
+                setCheckingUpdate(true);
+                setUpdateCheckResult(null);
+                const result = await onCheckForUpdate();
+                if (!result) setUpdateCheckResult("up-to-date");
+                setCheckingUpdate(false);
+              }}
+              disabled={checkingUpdate}
+              className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors disabled:opacity-50"
+            >
+              {checkingUpdate
+                ? "Checking..."
+                : updateCheckResult === "up-to-date"
+                  ? "Up to date"
+                  : "Check for updates"}
+            </button>
+          )}
         </div>
       </div>
 
