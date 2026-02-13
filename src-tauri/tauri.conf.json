@@ -41,7 +41,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc2MDU5MDNEMDE3QzNBNjgKUldSb09ud0JQWkFGZG54eFZqNUtsYXhhMU9GM1MrNUUrVlYwZHNGaHhlMlc2K3VjVkZFUC96c2sK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIxQThBODQ0RDk2RjIzQUYKUldTdkkyL1pSS2lvc2IwcGNJRlQxVkxrZW13cmhIdVg0Ym5FMFZVamxsdlhhY2JWUWRTanZTRmQK",
       "endpoints": [
         "https://github.com/protomated/youtrackd/releases/latest/download/latest.json"
       ]
