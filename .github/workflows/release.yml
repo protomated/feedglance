@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name for the release (e.g. youtrackd-v0.2.1)'
+        required: true
+        type: string
 
 concurrency:
   group: release
@@ -11,7 +17,9 @@ concurrency:
 jobs:
   # ── Step 1: release-please analyses commits and creates/updates a PR ──
   # When a Release PR is merged, it creates a tag + GitHub release.
+  # Skipped on workflow_dispatch since we already have the tag.
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -37,11 +45,14 @@ jobs:
             --method PATCH -F draft=true
 
   # ── Step 2: Build Tauri app for all platforms ─────────────────────────
-  # Only runs when release-please actually created a release (i.e. the
-  # Release PR was merged on this push).
+  # Runs when release-please creates a release OR on manual dispatch.
   build-tauri:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: |
+      always() && (
+        (needs.release-please.result == 'success' && needs.release-please.outputs.release_created == 'true') ||
+        (github.event_name == 'workflow_dispatch')
+      )
     permissions:
       contents: write
     strategy:
@@ -102,8 +113,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.release-please.outputs.tag_name }}
-          releaseName: 'YouTrackd ${{ needs.release-please.outputs.tag_name }}'
+          tagName: ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}
+          releaseName: 'YouTrackd ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}'
           releaseBody: |
             See the assets below to download and install.
 
