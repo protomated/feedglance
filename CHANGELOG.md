@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.1...youtrackd-v0.2.2) (2026-02-14)
+
+
+### Bug Fixes
+
+* **release:** regenerate signing key and add workflow_dispatch support ([c0bc000](https://github.com/protomated/youtrackd/commit/c0bc00042c2fa2e773d0970ad8f9b16e48d1fe51))
+
 ## [0.2.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.0...youtrackd-v0.2.1) (2026-02-12)
 
 
