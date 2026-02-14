@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useNotificationStore, groupActivities, countUnread } from "../stores/notifications";
 import { useFilterStore } from "../stores/filters";
 import { useAuthStore } from "../stores/auth";
@@ -70,6 +70,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const searchQuery = useFilterStore((s) => s.searchQuery);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [showRead, setShowRead] = useState(false);
 
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
@@ -101,8 +102,18 @@ export function NotificationFeed({ focusedActivityId }: Props) {
     });
   }, [activities, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
 
-  const groups = groupActivities(filteredActivities, readIds);
   const unreadCount = countUnread(filteredActivities, readIds);
+  const readCount = filteredActivities.length - unreadCount;
+
+  // When there are no unread items and showRead is off, show the "all caught up" state.
+  // When showRead is toggled on (or there are unread items), show everything.
+  const visibleActivities = useMemo(() => {
+    if (unreadCount > 0 || showRead) return filteredActivities;
+    // 0 unread, showRead off → show only unread (i.e. nothing)
+    return filteredActivities.filter((a) => !readIds.has(a.id));
+  }, [filteredActivities, readIds, unreadCount, showRead]);
+
+  const groups = groupActivities(visibleActivities, readIds);
 
   const handleOpenInBrowser = (targetId: string, targetType?: string) => {
     if (!credentials?.url) return;
@@ -127,8 +138,8 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       {/* Filter bar */}
       <FilterBar />
 
-      {/* Toolbar */}
-      {unreadCount > 0 && (
+      {/* Toolbar: unread count or "showing read" indicator */}
+      {unreadCount > 0 ? (
         <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
           <span className="text-xs text-gray-500 dark:text-gray-400">
             {unreadCount} unread
@@ -140,12 +151,28 @@ export function NotificationFeed({ focusedActivityId }: Props) {
             Mark all read
           </button>
         </div>
-      )}
+      ) : showRead && readCount > 0 ? (
+        <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
+            Showing read activity
+          </span>
+          <button
+            onClick={() => setShowRead(false)}
+            className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 transition-colors"
+          >
+            Hide read
+          </button>
+        </div>
+      ) : null}
 
       {/* Scrollable feed */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {groups.length === 0 ? (
-          <EmptyState loading={loading} />
+          <EmptyState
+            loading={loading}
+            readCount={readCount}
+            onShowRead={readCount > 0 ? () => setShowRead(true) : undefined}
+          />
         ) : (
           groups.map((group) => (
             <NotificationGroup
