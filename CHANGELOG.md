@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.2...youtrackd-v0.2.3) (2026-02-14)
+
+
+### Bug Fixes
+
+* **notification:** update empty state and read activity handling ([5c7bd76](https://github.com/protomated/youtrackd/commit/5c7bd76337d6b8b6afae76942aebf6225264dfd0))
+
 ## [0.2.2](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.1...youtrackd-v0.2.2) (2026-02-14)
 
 
