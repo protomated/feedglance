@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.3...youtrackd-v0.2.4) (2026-02-16)
+
+
+### Bug Fixes
+
+* **notification:** update unread count calculation to use filtered activities ([a2ef837](https://github.com/protomated/youtrackd/commit/a2ef83794fff01f7f0d8e92fb436e804fea326ba))
+
 ## [0.2.3](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.2...youtrackd-v0.2.3) (2026-02-14)
 
 
