@@ -83,8 +83,6 @@ function App() {
   const readIds = useNotificationStore((s) => s.readIds);
   const markRead = useNotificationStore((s) => s.markRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
-  const unreadCount = countUnread(activities, readIds);
-
   const initFilters = useFilterStore((s) => s.initialize);
   const selectedProjects = useFilterStore((s) => s.selectedProjects);
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
@@ -116,6 +114,9 @@ function App() {
       return true;
     });
   }, [activities, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
+
+  // Unread count derived from filtered activities so badge matches the feed
+  const unreadCount = countUnread(flatActivities, readIds);
 
   // Keyboard action: open in browser
   const handleKbOpen = useCallback(
