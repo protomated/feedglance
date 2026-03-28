@@ -16,7 +16,7 @@ interface NotificationState {
   /** Initialize: load activities from backend, subscribe to events. */
   initialize: () => Promise<void>;
   /** Start polling with credentials. */
-  startPolling: (url: string, token: string) => Promise<void>;
+  startPolling: (url: string, token: string, currentUserId?: string) => Promise<void>;
   /** Stop polling. */
   stopPolling: () => Promise<void>;
   /** Set focus state for adaptive intervals. */
@@ -54,8 +54,8 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     set({ loading: false });
   },
 
-  startPolling: async (url: string, token: string) => {
-    await invoke("start_polling", { url, token });
+  startPolling: async (url: string, token: string, currentUserId?: string) => {
+    await invoke("start_polling", { url, token, currentUserId });
   },
 
   stopPolling: async () => {

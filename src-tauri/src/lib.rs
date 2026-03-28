@@ -32,10 +32,14 @@ async fn start_polling(
     state: tauri::State<'_, SharedPollingState>,
     url: String,
     token: String,
+    current_user_id: Option<String>,
 ) -> Result<(), String> {
     let mut s = state.write().await;
     s.url = url;
     s.token = token;
+    if let Some(uid) = current_user_id {
+        s.current_user_id = uid;
+    }
     s.running = true;
     Ok(())
 }

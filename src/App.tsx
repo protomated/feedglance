@@ -270,7 +270,7 @@ function App() {
     const setup = async () => {
       if (!pollingStartedRef.current) {
         await initNotifications();
-        await startPolling(credentials.url, credentials.token);
+        await startPolling(credentials.url, credentials.token, user?.id);
         pollingStartedRef.current = true;
       }
     };
@@ -282,7 +282,7 @@ function App() {
         pollingStartedRef.current = false;
       }
     };
-  }, [connectionStatus, credentials, initNotifications, startPolling, stopPolling]);
+  }, [connectionStatus, credentials, user, initNotifications, startPolling, stopPolling]);
 
   // Window focus detection for adaptive poll intervals
   useEffect(() => {
