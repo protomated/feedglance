@@ -64,6 +64,8 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const markAllRead = useNotificationStore((s) => s.markAllRead);
   const credentials = useAuthStore((s) => s.credentials);
 
+  const currentUserId = useAuthStore((s) => s.user?.id);
+
   const selectedProjects = useFilterStore((s) => s.selectedProjects);
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
   const mutedIssues = useFilterStore((s) => s.mutedIssues);
@@ -75,6 +77,9 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
     return activities.filter((a) => {
+      // Filter out current user's own activities
+      if (currentUserId && a.author?.id === currentUserId) return false;
+
       // Project filter (empty = show all)
       if (selectedProjects.size > 0) {
         const pk = resolveProjectKey(a);
@@ -100,7 +105,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
 
       return true;
     });
-  }, [activities, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
+  }, [activities, currentUserId, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
 
   const unreadCount = countUnread(filteredActivities, readIds);
   const readCount = filteredActivities.length - unreadCount;

@@ -52,6 +52,8 @@ pub struct PollingState {
     pub read_ids: HashSet<String>,
     /// Muted issue IDs (readable IDs like "PROJ-123") — skip OS notifications for these.
     pub muted_issues: HashSet<String>,
+    /// Current user ID — activities from this user are excluded.
+    pub current_user_id: String,
     /// Credentials for polling.
     pub url: String,
     pub token: String,
@@ -69,6 +71,7 @@ impl PollingState {
             activities: Vec::new(),
             read_ids: HashSet::new(),
             muted_issues: HashSet::new(),
+            current_user_id: String::new(),
             url: String::new(),
             token: String::new(),
             consecutive_failures: 0,
@@ -144,6 +147,15 @@ pub fn start_polling_loop(
                     let mut non_muted_new_count = 0u32;
 
                     for activity in new_activities {
+                        // Skip current user's own activities
+                        if !s.current_user_id.is_empty() {
+                            if let Some(ref author) = activity.author {
+                                if author.id == s.current_user_id {
+                                    continue;
+                                }
+                            }
+                        }
+
                         // Deduplication
                         if s.seen_ids.contains(&activity.id) {
                             continue;
