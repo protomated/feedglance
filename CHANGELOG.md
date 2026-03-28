@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.4...youtrackd-v0.2.5) (2026-03-28)
+
+
+### Bug Fixes
+
+* **notification:** filter out current user's own activities ([c6b65fc](https://github.com/protomated/youtrackd/commit/c6b65fcc24550d06f2b0fce35aa9d9c6fa2d55c5))
+
 ## [0.2.4](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.3...youtrackd-v0.2.4) (2026-02-16)
 
 
