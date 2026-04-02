@@ -77,21 +77,16 @@ async fn get_activities(
 
 #[tauri::command]
 async fn mark_activity_read(
-    app: tauri::AppHandle,
     state: tauri::State<'_, SharedPollingState>,
     activity_id: String,
 ) -> Result<(), String> {
     let mut s = state.write().await;
     s.read_ids.insert(activity_id);
-    let unread = s.activities.iter().filter(|a| !s.read_ids.contains(&a.id)).count() as u32;
-    drop(s);
-    tray::update_tray_badge(&app, unread);
     Ok(())
 }
 
 #[tauri::command]
 async fn mark_all_read(
-    app: tauri::AppHandle,
     state: tauri::State<'_, SharedPollingState>,
 ) -> Result<(), String> {
     let mut s = state.write().await;
@@ -99,8 +94,6 @@ async fn mark_all_read(
     for id in all_ids {
         s.read_ids.insert(id);
     }
-    drop(s);
-    tray::update_tray_badge(&app, 0);
     Ok(())
 }
 
@@ -124,15 +117,11 @@ async fn set_muted_issues(
 
 #[tauri::command]
 async fn set_read_ids(
-    app: tauri::AppHandle,
     state: tauri::State<'_, SharedPollingState>,
     read_ids: Vec<String>,
 ) -> Result<(), String> {
     let mut s = state.write().await;
     s.read_ids = read_ids.into_iter().collect();
-    let unread = s.activities.iter().filter(|a| !s.read_ids.contains(&a.id)).count() as u32;
-    drop(s);
-    tray::update_tray_badge(&app, unread);
     Ok(())
 }
 
@@ -145,6 +134,28 @@ async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result
         .filter(|a| !s.read_ids.contains(&a.id))
         .count() as u32;
     Ok(count)
+}
+
+// --- Tray badge ---
+
+#[tauri::command]
+async fn set_tray_badge(
+    app: tauri::AppHandle,
+    count: u32,
+) -> Result<(), String> {
+    tray::update_tray_badge(&app, count);
+    Ok(())
+}
+
+// --- Project listing ---
+
+#[tauri::command]
+async fn get_projects(
+    url: String,
+    token: String,
+) -> Result<Vec<youtrack::ProjectInfo>, String> {
+    let client = YouTrackClient::new(&url, &token);
+    client.get_projects().await.map_err(|e| e.to_string())
 }
 
 // --- Epic 3: Quick Actions commands ---
@@ -276,6 +287,8 @@ pub fn run() {
             get_read_ids,
             get_unread_count,
             set_muted_issues,
+            get_projects,
+            set_tray_badge,
             set_read_ids,
             execute_command,
             post_comment,
