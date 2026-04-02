@@ -13,6 +13,7 @@ const SHORTCUTS: Array<{ keys: string; description: string }> = [
   { keys: "a", description: "Assign issue" },
   { keys: "e", description: "Mark as read" },
   { keys: "Shift + e", description: "Mark all as read" },
+  { keys: "p", description: "Pin / unpin" },
   { keys: "Escape", description: "Clear focus / close" },
   { keys: "?", description: "Toggle this help" },
 ];

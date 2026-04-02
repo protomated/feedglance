@@ -9,6 +9,7 @@ export interface KeyboardActions {
   onMarkRead: (activityId: string) => void;
   onMarkAllRead: () => void;
   onToggleHelp: () => void;
+  onPin: (activityId: string) => void;
 }
 
 interface UseKeyboardNavigationReturn {
@@ -30,6 +31,7 @@ interface UseKeyboardNavigationReturn {
  *   a              — assign focused item
  *   e              — mark focused item as read
  *   Shift+e        — mark all as read
+ *   p              — pin/unpin focused item
  *   ?              — toggle shortcut help overlay
  *   Escape         — clear focus
  */
@@ -122,6 +124,14 @@ export function useKeyboardNavigation(
           if (e.shiftKey) {
             e.preventDefault();
             actions.onMarkAllRead();
+          }
+          break;
+        }
+
+        case "p": {
+          if (focusedActivityId) {
+            e.preventDefault();
+            actions.onPin(focusedActivityId);
           }
           break;
         }

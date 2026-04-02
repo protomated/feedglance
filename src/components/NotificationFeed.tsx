@@ -71,8 +71,11 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const mutedIssues = useFilterStore((s) => s.mutedIssues);
   const searchQuery = useFilterStore((s) => s.searchQuery);
 
+  const pinnedIds = useNotificationStore((s) => s.pinnedIds);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showRead, setShowRead] = useState(false);
+  const [showPinnedOnly, setShowPinnedOnly] = useState(false);
 
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
@@ -113,11 +116,21 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   // When there are no unread items and showRead is off, show the "all caught up" state.
   // When showRead is toggled on (or there are unread items), show everything.
   const visibleActivities = useMemo(() => {
-    if (unreadCount > 0 || showRead) return filteredActivities;
-    // 0 unread, showRead off → show only unread (i.e. nothing)
-    return filteredActivities.filter((a) => !readIds.has(a.id));
-  }, [filteredActivities, readIds, unreadCount, showRead]);
+    let result: ActivityItem[];
+    if (unreadCount > 0 || showRead) {
+      result = filteredActivities;
+    } else {
+      // 0 unread, showRead off → show only unread (i.e. nothing)
+      result = filteredActivities.filter((a) => !readIds.has(a.id));
+    }
+    // Apply pinned filter
+    if (showPinnedOnly) {
+      result = result.filter((a) => pinnedIds.has(a.id));
+    }
+    return result;
+  }, [filteredActivities, readIds, pinnedIds, unreadCount, showRead, showPinnedOnly]);
 
+  const pinnedCount = filteredActivities.filter((a) => pinnedIds.has(a.id)).length;
   const groups = groupActivities(visibleActivities, readIds);
 
   const handleOpenInBrowser = (targetId: string, targetType?: string) => {
@@ -146,9 +159,27 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       {/* Toolbar: unread count or "showing read" indicator */}
       {unreadCount > 0 ? (
         <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            {unreadCount} unread
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              {unreadCount} unread
+            </span>
+            {pinnedCount > 0 && (
+              <button
+                onClick={() => setShowPinnedOnly((v) => !v)}
+                className={`text-xs flex items-center gap-0.5 transition-colors ${
+                  showPinnedOnly
+                    ? "text-amber-600 dark:text-amber-400"
+                    : "text-gray-400 dark:text-gray-500 hover:text-amber-500"
+                }`}
+                title={showPinnedOnly ? "Show all" : "Show pinned only"}
+              >
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Z" />
+                </svg>
+                {pinnedCount}
+              </button>
+            )}
+          </div>
           <button
             onClick={markAllRead}
             className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 transition-colors"
@@ -158,9 +189,27 @@ export function NotificationFeed({ focusedActivityId }: Props) {
         </div>
       ) : showRead && readCount > 0 ? (
         <div className="flex items-center justify-between px-3 py-1.5 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-100 dark:border-gray-800">
-          <span className="text-xs text-gray-500 dark:text-gray-400">
-            Showing read activity
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              Showing read activity
+            </span>
+            {pinnedCount > 0 && (
+              <button
+                onClick={() => setShowPinnedOnly((v) => !v)}
+                className={`text-xs flex items-center gap-0.5 transition-colors ${
+                  showPinnedOnly
+                    ? "text-amber-600 dark:text-amber-400"
+                    : "text-gray-400 dark:text-gray-500 hover:text-amber-500"
+                }`}
+                title={showPinnedOnly ? "Show all" : "Show pinned only"}
+              >
+                <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Z" />
+                </svg>
+                {pinnedCount}
+              </button>
+            )}
+          </div>
           <button
             onClick={() => setShowRead(false)}
             className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 transition-colors"
@@ -184,6 +233,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
               key={group.projectKey}
               group={group}
               readIds={readIds}
+              pinnedIds={pinnedIds}
               focusedActivityId={focusedActivityId}
               onMarkRead={markRead}
               onOpenInBrowser={handleOpenInBrowser}

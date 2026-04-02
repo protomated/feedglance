@@ -1,15 +1,66 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { load } from "@tauri-apps/plugin-store";
 import type {
   ActivityItem,
   ActivityProject,
   NotificationGroup,
 } from "../types/activity";
 
+const READ_STORE_NAME = "read_ids.json";
+const KEY_READ_IDS = "read_ids";
+const KEY_PINNED_IDS = "pinned_ids";
+
+let readStoreInstance: Awaited<ReturnType<typeof load>> | null = null;
+
+async function getReadStore() {
+  if (!readStoreInstance) {
+    readStoreInstance = await load(READ_STORE_NAME);
+  }
+  return readStoreInstance;
+}
+
+/** Persist read IDs to disk. */
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+async function persistReadIds(readIds: Set<string>) {
+  // Debounce writes — multiple marks in quick succession only write once
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(async () => {
+    try {
+      const store = await getReadStore();
+      await store.set(KEY_READ_IDS, Array.from(readIds));
+      await store.save();
+    } catch {
+      // Store may not be ready yet
+    }
+  }, 500);
+}
+
+/** Persist pinned IDs to disk. */
+async function persistPinnedIds(pinnedIds: Set<string>) {
+  try {
+    const store = await getReadStore();
+    await store.set(KEY_PINNED_IDS, Array.from(pinnedIds));
+    await store.save();
+  } catch {
+    // Store may not be ready yet
+  }
+}
+
+/** Sync read IDs to the backend so tray badge is correct. */
+async function syncReadIdsToBackend(readIds: Set<string>) {
+  try {
+    await invoke("set_read_ids", { readIds: Array.from(readIds) });
+  } catch {
+    // Backend may not be ready yet
+  }
+}
+
 interface NotificationState {
   activities: ActivityItem[];
   readIds: Set<string>;
+  pinnedIds: Set<string>;
   loading: boolean;
   error: string | null;
 
@@ -27,16 +78,35 @@ interface NotificationState {
   markAllRead: () => Promise<void>;
   /** Refresh activities from backend cache. */
   refresh: () => Promise<void>;
+  /** Pin an activity for later review. */
+  pinActivity: (activityId: string) => void;
+  /** Unpin an activity. */
+  unpinActivity: (activityId: string) => void;
 }
 
 export const useNotificationStore = create<NotificationState>((set, get) => ({
   activities: [],
   readIds: new Set(),
+  pinnedIds: new Set(),
   loading: false,
   error: null,
 
   initialize: async () => {
     set({ loading: true });
+
+    // Load persisted read IDs and pinned IDs from store
+    try {
+      const store = await getReadStore();
+      const savedReadIds = await store.get<string[]>(KEY_READ_IDS);
+      const savedPinnedIds = await store.get<string[]>(KEY_PINNED_IDS);
+      const readIdSet = new Set(savedReadIds ?? []);
+      const pinnedIdSet = new Set(savedPinnedIds ?? []);
+      set({ readIds: readIdSet, pinnedIds: pinnedIdSet });
+      // Sync persisted read IDs to backend so tray badge is correct
+      syncReadIdsToBackend(readIdSet);
+    } catch {
+      // First run — no stored data
+    }
 
     // Listen for backend polling events
     await listen<number>("activities-updated", async (event) => {
@@ -49,7 +119,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       set({ error: event.payload });
     });
 
-    // Load existing activities and read state from backend
+    // Load existing activities from backend
     await get().refresh();
     set({ loading: false });
   },
@@ -68,38 +138,46 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   markRead: async (activityId: string) => {
     await invoke("mark_activity_read", { activityId });
-    set((state) => {
-      const newReadIds = new Set(state.readIds);
-      newReadIds.add(activityId);
-      return { readIds: newReadIds };
-    });
+    const newReadIds = new Set(get().readIds);
+    newReadIds.add(activityId);
+    set({ readIds: newReadIds });
+    persistReadIds(newReadIds);
   },
 
   markAllRead: async () => {
     await invoke("mark_all_read");
-    set((state) => {
-      const newReadIds = new Set(state.readIds);
-      for (const a of state.activities) {
-        newReadIds.add(a.id);
-      }
-      return { readIds: newReadIds };
-    });
+    const newReadIds = new Set(get().readIds);
+    for (const a of get().activities) {
+      newReadIds.add(a.id);
+    }
+    set({ readIds: newReadIds });
+    persistReadIds(newReadIds);
   },
 
   refresh: async () => {
     try {
-      const [activities, readIds] = await Promise.all([
-        invoke<ActivityItem[]>("get_activities"),
-        invoke<string[]>("get_read_ids"),
-      ]);
+      const activities = await invoke<ActivityItem[]>("get_activities");
       set({
         activities,
-        readIds: new Set(readIds),
         error: null,
       });
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
     }
+  },
+
+  pinActivity: (activityId: string) => {
+    const newPinnedIds = new Set(get().pinnedIds);
+    newPinnedIds.add(activityId);
+    set({ pinnedIds: newPinnedIds });
+    persistPinnedIds(newPinnedIds);
+  },
+
+  unpinActivity: (activityId: string) => {
+    const newPinnedIds = new Set(get().pinnedIds);
+    newPinnedIds.delete(activityId);
+    set({ pinnedIds: newPinnedIds });
+    persistPinnedIds(newPinnedIds);
   },
 }));
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ActivityItem } from "../types/activity";
 import { useFilterStore } from "../stores/filters";
+import { useNotificationStore } from "../stores/notifications";
 import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
 import { AssignDropdown } from "./AssignDropdown";
@@ -146,15 +147,18 @@ function isLikelyMultiLine(text: string): boolean {
 interface Props {
   activity: ActivityItem;
   isRead: boolean;
+  isPinned?: boolean;
   isFocused?: boolean;
   onMarkRead: (id: string) => void;
   onOpenInBrowser?: (targetId: string, targetType?: string) => void;
 }
 
-export function NotificationItem({ activity, isRead, isFocused, onMarkRead, onOpenInBrowser }: Props) {
+export function NotificationItem({ activity, isRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
   const [commentExpanded, setCommentExpanded] = useState(false);
   const muteIssue = useFilterStore((s) => s.muteIssue);
+  const pinActivity = useNotificationStore((s) => s.pinActivity);
+  const unpinActivity = useNotificationStore((s) => s.unpinActivity);
 
   // Listen for keyboard-triggered actions
   useEffect(() => {
@@ -263,7 +267,12 @@ export function NotificationItem({ activity, isRead, isFocused, onMarkRead, onOp
 
         {/* Timestamp + hover actions */}
         <div className="flex-shrink-0 flex items-start gap-1">
-          <span className="text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:hidden">
+          <span className="text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:hidden flex items-center gap-1">
+            {isPinned && (
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" className="text-amber-500">
+                <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Z" />
+              </svg>
+            )}
             {time}
           </span>
 
@@ -346,6 +355,32 @@ export function NotificationItem({ activity, isRead, isFocused, onMarkRead, onOp
                   )}
                 </div>
               )}
+
+              {/* Pin/Unpin */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (isPinned) {
+                    unpinActivity(activity.id);
+                  } else {
+                    pinActivity(activity.id);
+                  }
+                }}
+                title={isPinned ? "Unpin" : "Pin for later"}
+                className={`p-1 rounded transition-colors ${
+                  isPinned
+                    ? "text-amber-500 hover:text-amber-600 hover:bg-gray-100 dark:hover:bg-gray-700"
+                    : "text-gray-400 hover:text-amber-500 hover:bg-gray-100 dark:hover:bg-gray-700"
+                }`}
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                  {isPinned ? (
+                    <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Z" />
+                  ) : (
+                    <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Zm1.84.86a.25.25 0 0 0-.404.072l-.613 1.327a4.58 4.58 0 0 1-3.098 2.537l-1.327.613a.25.25 0 0 0-.072.404l4.5 4.5a.25.25 0 0 0 .404-.072l.613-1.327a4.58 4.58 0 0 1 2.537-3.098l1.327-.613a.25.25 0 0 0 .072-.404Z" />
+                  )}
+                </svg>
+              </button>
 
               {/* Mute issue */}
               {issueId && (
