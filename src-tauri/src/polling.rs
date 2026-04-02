@@ -193,17 +193,10 @@ pub fn start_polling_loop(
                         s.read_ids.clear();
                     }
 
-                    // Compute unread count before dropping the lock
-                    let unread_count = s
-                        .activities
-                        .iter()
-                        .filter(|a| !s.read_ids.contains(&a.id))
-                        .count() as u32;
-
                     drop(s);
 
-                    // Update tray badge with current unread count
-                    crate::tray::update_tray_badge(&app_handle, unread_count);
+                    // Tray badge is updated by the frontend (via set_tray_badge)
+                    // using the filtered unread count so it matches the feed.
 
                     // Emit event to frontend with the new activity count
                     let _ = app_handle.emit("activities-updated", new_count);

@@ -1,5 +1,7 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useFilterStore } from "../stores/filters";
+import { useAuthStore } from "../stores/auth";
 import { useNotificationStore } from "../stores/notifications";
 import type { ActivityCategoryId, ActivityItem } from "../types/activity";
 
@@ -15,6 +17,11 @@ const CATEGORY_LABELS: Record<ActivityCategoryId, string> = {
 };
 
 const ALL_CATEGORIES: ActivityCategoryId[] = Object.keys(CATEGORY_LABELS) as ActivityCategoryId[];
+
+interface ProjectEntry {
+  shortName: string;
+  name: string;
+}
 
 /** Resolve the project key for an activity (mirrors notifications store helper). */
 function resolveProjectKey(activity: ActivityItem): string {
@@ -33,6 +40,8 @@ function resolveProjectName(activity: ActivityItem): string {
 
 export function FilterBar() {
   const activities = useNotificationStore((s) => s.activities);
+  const credentials = useAuthStore((s) => s.credentials);
+  const connectionStatus = useAuthStore((s) => s.connectionStatus);
   const selectedProjects = useFilterStore((s) => s.selectedProjects);
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
   const searchQuery = useFilterStore((s) => s.searchQuery);
@@ -41,17 +50,37 @@ export function FilterBar() {
   const setSearchQuery = useFilterStore((s) => s.setSearchQuery);
   const clearAll = useFilterStore((s) => s.clearAll);
 
-  // Derive unique projects from activities
+  const [apiProjects, setApiProjects] = useState<ProjectEntry[]>([]);
+
+  // Fetch all projects from the API when connected
+  useEffect(() => {
+    if (connectionStatus !== "connected" || !credentials) return;
+    invoke<ProjectEntry[]>("get_projects", {
+      url: credentials.url,
+      token: credentials.token,
+    })
+      .then((projects) => setApiProjects(projects))
+      .catch(() => {
+        // Fallback: derive from activities if API call fails
+      });
+  }, [connectionStatus, credentials]);
+
+  // Merge API projects with activity-derived projects (API projects take priority)
   const projects = useMemo(() => {
     const map = new Map<string, string>();
+    // Add all projects from the API
+    for (const p of apiProjects) {
+      map.set(p.shortName, p.name);
+    }
+    // Fill in any projects found in activities but not in API response
     for (const a of activities) {
       const key = resolveProjectKey(a);
-      if (!map.has(key)) {
+      if (key !== "unknown" && !map.has(key)) {
         map.set(key, resolveProjectName(a));
       }
     }
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [activities]);
+  }, [apiProjects, activities]);
 
   const hasActiveFilters =
     selectedProjects.size > 0 ||

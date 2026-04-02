@@ -3,6 +3,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::activities::{ActivityItem, ACTIVITY_FIELDS, POLL_CATEGORIES};
 
+// --- Project listing ---
+
+/// A project from the YouTrack API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInfo {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub short_name: String,
+}
+
 // --- Types for Quick Actions (Epic 3) ---
 
 /// A state/value from a project's custom field bundle.
@@ -109,6 +123,33 @@ impl YouTrackClient {
         }
 
         Ok(user)
+    }
+
+    /// Fetch all projects accessible to the current user.
+    pub async fn get_projects(
+        &self,
+    ) -> Result<Vec<ProjectInfo>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/api/admin/projects?fields=id,name,shortName&$top=-1",
+            self.base_url
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(ACCEPT, "application/json")
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Failed to fetch projects ({}): {}", status, body).into());
+        }
+
+        let projects: Vec<ProjectInfo> = resp.json().await?;
+        Ok(projects)
     }
 
     /// Fetch activities since `start_timestamp` (unix ms).

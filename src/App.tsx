@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -117,6 +118,11 @@ function App() {
 
   // Unread count derived from filtered activities so badge matches the feed
   const unreadCount = countUnread(flatActivities, readIds);
+
+  // Sync the filtered unread count to the tray badge so it matches the feed
+  useEffect(() => {
+    invoke("set_tray_badge", { count: unreadCount }).catch(() => {});
+  }, [unreadCount]);
 
   // Keyboard action: open in browser
   const handleKbOpen = useCallback(
