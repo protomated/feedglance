@@ -178,6 +178,21 @@ function App() {
     setShowHelp((prev) => !prev);
   }, []);
 
+  const pinActivity = useNotificationStore((s) => s.pinActivity);
+  const unpinActivity = useNotificationStore((s) => s.unpinActivity);
+  const pinnedIds = useNotificationStore((s) => s.pinnedIds);
+
+  const handleKbPin = useCallback(
+    (activityId: string) => {
+      if (pinnedIds.has(activityId)) {
+        unpinActivity(activityId);
+      } else {
+        pinActivity(activityId);
+      }
+    },
+    [pinnedIds, pinActivity, unpinActivity],
+  );
+
   const kbActions = useMemo(
     () => ({
       onOpenInBrowser: handleKbOpen,
@@ -187,8 +202,9 @@ function App() {
       onMarkRead: handleKbMarkRead,
       onMarkAllRead: handleKbMarkAllRead,
       onToggleHelp: handleToggleHelp,
+      onPin: handleKbPin,
     }),
-    [handleKbOpen, handleKbReply, handleKbStatus, handleKbAssign, handleKbMarkRead, handleKbMarkAllRead, handleToggleHelp],
+    [handleKbOpen, handleKbReply, handleKbStatus, handleKbAssign, handleKbMarkRead, handleKbMarkAllRead, handleToggleHelp, handleKbPin],
   );
 
   const { focusedActivityId, setFlatActivities } = useKeyboardNavigation(kbActions);

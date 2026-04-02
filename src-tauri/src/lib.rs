@@ -5,6 +5,7 @@ mod tray;
 mod youtrack;
 
 use std::sync::Arc;
+use tauri::Manager;
 use tauri_plugin_global_shortcut::ShortcutState;
 use tokio::sync::{Mutex, RwLock};
 
@@ -122,6 +123,20 @@ async fn set_muted_issues(
 }
 
 #[tauri::command]
+async fn set_read_ids(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SharedPollingState>,
+    read_ids: Vec<String>,
+) -> Result<(), String> {
+    let mut s = state.write().await;
+    s.read_ids = read_ids.into_iter().collect();
+    let unread = s.activities.iter().filter(|a| !s.read_ids.contains(&a.id)).count() as u32;
+    drop(s);
+    tray::update_tray_badge(&app, unread);
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result<u32, String> {
     let s = state.read().await;
     let count = s
@@ -218,8 +233,19 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Set up system tray
-            tray::setup_tray(app.handle(), polling_state.clone())?;
+            // Set up system tray — if it fails on Windows, show the window
+            // directly so the app isn't completely invisible.
+            match tray::setup_tray(app.handle(), polling_state.clone()) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Failed to set up system tray: {e}");
+                    // Fallback: show the main window so the user can still use the app
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
 
             // Global shortcut is registered from the frontend (allows user customization).
             // The Rust handler above will toggle the window for any registered shortcut.
@@ -250,6 +276,7 @@ pub fn run() {
             get_read_ids,
             get_unread_count,
             set_muted_issues,
+            set_read_ids,
             execute_command,
             post_comment,
             get_project_states,
