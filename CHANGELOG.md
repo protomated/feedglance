@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.5...youtrackd-v0.3.0) (2026-04-02)
+
+
+### Features
+
+* persist read state across restarts, add pin comments, fix Windows launch ([a3cc7c0](https://github.com/protomated/youtrackd/commit/a3cc7c0968aaf7f958db7f2c4178f8bc57a9e37c))
+
+
+### Bug Fixes
+
+* **release:** auto-publish draft releases after builds complete ([fb6c18a](https://github.com/protomated/youtrackd/commit/fb6c18a1c6ab658c2e7d314a14315f44ca4dd656))
+* **tray:** catch panic when tray position unavailable on Linux ([385c351](https://github.com/protomated/youtrackd/commit/385c3518b6b572343791234973335ba3da982de9)), closes [#6](https://github.com/protomated/youtrackd/issues/6)
+
 ## [0.2.5](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.4...youtrackd-v0.2.5) (2026-03-28)
 
 
