@@ -90,8 +90,18 @@ pub fn toggle_window(app: &AppHandle) {
 /// Show the main window positioned at the tray icon and focus it.
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        // Position the window centered below the tray icon
-        let _ = window.move_window(Position::TrayCenter);
+        // Position the window centered below the tray icon.
+        // On some Linux DEs the tray position is never reported to the
+        // positioner plugin, which causes `move_window` to panic.
+        // Catch that panic and fall back to centering on screen.
+        let w = window.clone();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = w.move_window(Position::TrayCenter);
+        }))
+        .is_err()
+        {
+            let _ = window.center();
+        }
         let _ = window.show();
         let _ = window.set_focus();
     }
