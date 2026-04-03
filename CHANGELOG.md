@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.3.0...youtrackd-v0.3.1) (2026-04-02)
+
+
+### Bug Fixes
+
+* show all projects in filter bar and sync tray badge with active filters ([74ca359](https://github.com/protomated/youtrackd/commit/74ca3597fa08153e6f0f90f242ca2b967a779f12))
+
 ## [0.3.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.2.5...youtrackd-v0.3.0) (2026-04-02)
 
 
