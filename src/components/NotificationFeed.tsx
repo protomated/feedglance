@@ -40,7 +40,6 @@ function matchesSearch(activity: ActivityItem, query: string): boolean {
   if (t?.issue?.idReadable?.toLowerCase().includes(q)) return true;
   if (t?.issue?.summary?.toLowerCase().includes(q)) return true;
 
-  // Search in comment text (can be in added array)
   if (activity.category?.id === "CommentsCategory" && Array.isArray(activity.added)) {
     for (const item of activity.added) {
       if (typeof item === "object" && item !== null && "text" in item) {
@@ -59,10 +58,10 @@ interface Props {
 export function NotificationFeed({ focusedActivityId }: Props) {
   const loading = useNotificationStore((s) => s.loading);
   const activities = useNotificationStore((s) => s.activities);
-  const readIds = useNotificationStore((s) => s.readIds);
+  const allReadIds = useNotificationStore((s) => s.allReadIds);
   const markRead = useNotificationStore((s) => s.markRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
-  const credentials = useAuthStore((s) => s.credentials);
+  const accounts = useAuthStore((s) => s.accounts);
 
   const currentUserId = useAuthStore((s) => s.user?.id);
 
@@ -70,6 +69,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
   const mutedIssues = useFilterStore((s) => s.mutedIssues);
   const searchQuery = useFilterStore((s) => s.searchQuery);
+  const selectedAccounts = useFilterStore((s) => s.selectedAccounts);
 
   const pinnedIds = useNotificationStore((s) => s.pinnedIds);
 
@@ -77,11 +77,19 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const [showRead, setShowRead] = useState(false);
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
 
+  // Compute flat read IDs for display
+  const readIds = useMemo(() => allReadIds(), [allReadIds, activities]);
+
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
     return activities.filter((a) => {
       // Filter out current user's own activities
       if (currentUserId && a.author?.id === currentUserId) return false;
+
+      // Account filter
+      if (selectedAccounts.size > 0 && a.accountId) {
+        if (!selectedAccounts.has(a.accountId)) return false;
+      }
 
       // Project filter (empty = show all)
       if (selectedProjects.size > 0) {
@@ -108,22 +116,18 @@ export function NotificationFeed({ focusedActivityId }: Props) {
 
       return true;
     });
-  }, [activities, currentUserId, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
+  }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
 
   const unreadCount = countUnread(filteredActivities, readIds);
   const readCount = filteredActivities.length - unreadCount;
 
-  // When there are no unread items and showRead is off, show the "all caught up" state.
-  // When showRead is toggled on (or there are unread items), show everything.
   const visibleActivities = useMemo(() => {
     let result: ActivityItem[];
     if (unreadCount > 0 || showRead) {
       result = filteredActivities;
     } else {
-      // 0 unread, showRead off → show only unread (i.e. nothing)
       result = filteredActivities.filter((a) => !readIds.has(a.id));
     }
-    // Apply pinned filter
     if (showPinnedOnly) {
       result = result.filter((a) => pinnedIds.has(a.id));
     }
@@ -133,8 +137,18 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const pinnedCount = filteredActivities.filter((a) => pinnedIds.has(a.id)).length;
   const groups = groupActivities(visibleActivities, readIds);
 
-  const handleOpenInBrowser = (targetId: string, targetType?: string) => {
-    if (!credentials?.url) return;
+  const handleOpenInBrowser = (targetId: string, targetType?: string, accountId?: string) => {
+    // Resolve base URL from the activity's account
+    let baseUrl: string | undefined;
+    if (accountId) {
+      const account = accounts.find((a) => a.id === accountId);
+      baseUrl = account?.url;
+    }
+    if (!baseUrl && accounts.length > 0) {
+      baseUrl = accounts[0].url;
+    }
+    if (!baseUrl) return;
+
     let path: string;
     switch (targetType) {
       case "Project":
@@ -147,7 +161,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
         path = "issue";
         break;
     }
-    const url = `${credentials.url}/${path}/${targetId}`;
+    const url = `${baseUrl}/${path}/${targetId}`;
     openUrl(url);
   };
 

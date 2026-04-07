@@ -8,15 +8,18 @@ import type { StateBundleElement, CommandResult } from "../types/youtrack";
 interface Props {
   issueId: string;
   projectId: string;
+  accountId?: string;
   onClose: () => void;
 }
 
-export function StatusDropdown({ issueId, projectId, onClose }: Props) {
+export function StatusDropdown({ issueId, projectId, accountId, onClose }: Props) {
   const [states, setStates] = useState<StateBundleElement[]>([]);
   const [loading, setLoading] = useState(true);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const credentials = useAuthStore((s) => s.credentials);
+  const getAccountCredentials = useAuthStore((s) => s.getAccountCredentials);
+  const legacyCredentials = useAuthStore((s) => s.credentials);
+  const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
   const refresh = useNotificationStore((s) => s.refresh);
   const dropdownRef = useRef<HTMLDivElement>(null);
 

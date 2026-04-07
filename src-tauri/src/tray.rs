@@ -37,13 +37,15 @@ pub fn setup_tray(app: &AppHandle, state: SharedPollingState) -> tauri::Result<(
                 let state = state.clone();
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut s = state.write().await;
-                    let all_ids: Vec<String> =
-                        s.activities.iter().map(|a| a.id.clone()).collect();
-                    for id in all_ids {
-                        s.read_ids.insert(id);
+                    let mut mgr = state.write().await;
+                    for acct in mgr.accounts.values_mut() {
+                        let all_ids: Vec<String> =
+                            acct.activities.iter().map(|a| a.id.clone()).collect();
+                        for id in all_ids {
+                            acct.read_ids.insert(id);
+                        }
                     }
-                    drop(s);
+                    drop(mgr);
                     update_tray_badge(&app, 0);
                     // Also notify the frontend so its UI stays in sync
                     let _ = app.emit("tray-mark-all-read", ());

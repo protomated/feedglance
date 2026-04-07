@@ -40,39 +40,57 @@ function resolveProjectName(activity: ActivityItem): string {
 
 export function FilterBar() {
   const activities = useNotificationStore((s) => s.activities);
-  const credentials = useAuthStore((s) => s.credentials);
-  const connectionStatus = useAuthStore((s) => s.connectionStatus);
+  const accounts = useAuthStore((s) => s.accounts);
+  const connectionStatuses = useAuthStore((s) => s.connectionStatuses);
   const selectedProjects = useFilterStore((s) => s.selectedProjects);
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
+  const selectedAccounts = useFilterStore((s) => s.selectedAccounts);
   const searchQuery = useFilterStore((s) => s.searchQuery);
   const toggleProject = useFilterStore((s) => s.toggleProject);
   const toggleType = useFilterStore((s) => s.toggleType);
+  const toggleAccount = useFilterStore((s) => s.toggleAccount);
   const setSearchQuery = useFilterStore((s) => s.setSearchQuery);
   const clearAll = useFilterStore((s) => s.clearAll);
 
   const [apiProjects, setApiProjects] = useState<ProjectEntry[]>([]);
 
-  // Fetch all projects from the API when connected
+  // Fetch all projects from all connected accounts
   useEffect(() => {
-    if (connectionStatus !== "connected" || !credentials) return;
-    invoke<ProjectEntry[]>("get_projects", {
-      url: credentials.url,
-      token: credentials.token,
-    })
-      .then((projects) => setApiProjects(projects))
-      .catch(() => {
-        // Fallback: derive from activities if API call fails
-      });
-  }, [connectionStatus, credentials]);
+    const connectedAccounts = accounts.filter(
+      (a) => connectionStatuses[a.id] === "connected"
+    );
+    if (connectedAccounts.length === 0) return;
+
+    const fetchAll = async () => {
+      const allProjects: ProjectEntry[] = [];
+      const seen = new Set<string>();
+      for (const account of connectedAccounts) {
+        try {
+          const projects = await invoke<ProjectEntry[]>("get_projects", {
+            url: account.url,
+            token: account.token,
+          });
+          for (const p of projects) {
+            if (!seen.has(p.shortName)) {
+              seen.add(p.shortName);
+              allProjects.push(p);
+            }
+          }
+        } catch {
+          // Fallback: derive from activities
+        }
+      }
+      setApiProjects(allProjects);
+    };
+    fetchAll();
+  }, [accounts, connectionStatuses]);
 
   // Merge API projects with activity-derived projects (API projects take priority)
   const projects = useMemo(() => {
     const map = new Map<string, string>();
-    // Add all projects from the API
     for (const p of apiProjects) {
       map.set(p.shortName, p.name);
     }
-    // Fill in any projects found in activities but not in API response
     for (const a of activities) {
       const key = resolveProjectKey(a);
       if (key !== "unknown" && !map.has(key)) {
@@ -85,6 +103,7 @@ export function FilterBar() {
   const hasActiveFilters =
     selectedProjects.size > 0 ||
     selectedTypes.size > 0 ||
+    selectedAccounts.size > 0 ||
     searchQuery.length > 0;
 
   return (
@@ -99,6 +118,28 @@ export function FilterBar() {
           className="w-full text-xs px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-400 dark:focus:border-blue-500"
         />
       </div>
+
+      {/* Account chips (only when 2+ accounts) */}
+      {accounts.length > 1 && (
+        <div className="px-3 pb-1.5 flex flex-wrap gap-1">
+          {accounts.map((account) => {
+            const active = selectedAccounts.has(account.id);
+            return (
+              <button
+                key={account.id}
+                onClick={() => toggleAccount(account.id)}
+                className={`text-[10px] px-1.5 py-0.5 rounded-full transition-colors ${
+                  active
+                    ? "bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 border border-green-300 dark:border-green-700"
+                    : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-transparent hover:bg-gray-200 dark:hover:bg-gray-600"
+                }`}
+              >
+                {account.label || account.url}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Project chips */}
       {projects.length > 1 && (

@@ -8,14 +8,17 @@ import type { CommandResult, TeamMember } from "../types/youtrack";
 interface Props {
   issueId: string;
   projectId?: string;
+  accountId?: string;
   onClose: () => void;
 }
 
-export function InlineReply({ issueId, projectId, onClose }: Props) {
+export function InlineReply({ issueId, projectId, accountId, onClose }: Props) {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const credentials = useAuthStore((s) => s.credentials);
+  const getAccountCredentials = useAuthStore((s) => s.getAccountCredentials);
+  const legacyCredentials = useAuthStore((s) => s.credentials);
+  const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
   const refresh = useNotificationStore((s) => s.refresh);
 
   // @mention state

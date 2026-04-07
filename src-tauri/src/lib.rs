@@ -10,7 +10,7 @@ use tauri_plugin_global_shortcut::ShortcutState;
 use tokio::sync::{Mutex, RwLock};
 
 use cache::SharedProjectCache;
-use polling::{FocusState, PollingState, SharedPollingState};
+use polling::{AccountPollingState, FocusState, PollingManager, SharedPollingState};
 use youtrack::YouTrackClient;
 
 #[tauri::command]
@@ -31,24 +31,53 @@ async fn check_connection(url: String, token: String) -> Result<bool, String> {
 #[tauri::command]
 async fn start_polling(
     state: tauri::State<'_, SharedPollingState>,
+    account_id: String,
     url: String,
     token: String,
     current_user_id: Option<String>,
 ) -> Result<(), String> {
-    let mut s = state.write().await;
-    s.url = url;
-    s.token = token;
-    if let Some(uid) = current_user_id {
-        s.current_user_id = uid;
+    let mut mgr = state.write().await;
+    let uid = current_user_id.unwrap_or_default();
+    if let Some(acct) = mgr.accounts.get_mut(&account_id) {
+        acct.url = url;
+        acct.token = token;
+        acct.current_user_id = uid;
+        acct.running = true;
+    } else {
+        mgr.accounts
+            .insert(account_id, AccountPollingState::new(url, token, uid));
     }
-    s.running = true;
     Ok(())
 }
 
 #[tauri::command]
-async fn stop_polling(state: tauri::State<'_, SharedPollingState>) -> Result<(), String> {
-    let mut s = state.write().await;
-    s.running = false;
+async fn stop_polling(
+    state: tauri::State<'_, SharedPollingState>,
+    account_id: Option<String>,
+) -> Result<(), String> {
+    let mut mgr = state.write().await;
+    match account_id {
+        Some(id) => {
+            if let Some(acct) = mgr.accounts.get_mut(&id) {
+                acct.running = false;
+            }
+        }
+        None => {
+            for acct in mgr.accounts.values_mut() {
+                acct.running = false;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn remove_account(
+    state: tauri::State<'_, SharedPollingState>,
+    account_id: String,
+) -> Result<(), String> {
+    let mut mgr = state.write().await;
+    mgr.accounts.remove(&account_id);
     Ok(())
 }
 
@@ -57,8 +86,8 @@ async fn set_focus_state(
     state: tauri::State<'_, SharedPollingState>,
     focus: String,
 ) -> Result<(), String> {
-    let mut s = state.write().await;
-    s.focus_state = match focus.as_str() {
+    let mut mgr = state.write().await;
+    mgr.focus_state = match focus.as_str() {
         "focused" => FocusState::Focused,
         "minimized" => FocusState::Minimized,
         "idle" => FocusState::Idle,
@@ -70,29 +99,57 @@ async fn set_focus_state(
 #[tauri::command]
 async fn get_activities(
     state: tauri::State<'_, SharedPollingState>,
+    account_id: Option<String>,
 ) -> Result<Vec<activities::ActivityItem>, String> {
-    let s = state.read().await;
-    Ok(s.activities.clone())
+    let mgr = state.read().await;
+    match account_id {
+        Some(id) => {
+            if let Some(acct) = mgr.accounts.get(&id) {
+                Ok(acct.activities.clone())
+            } else {
+                Ok(vec![])
+            }
+        }
+        None => Ok(mgr.all_activities()),
+    }
 }
 
 #[tauri::command]
 async fn mark_activity_read(
     state: tauri::State<'_, SharedPollingState>,
     activity_id: String,
+    account_id: String,
 ) -> Result<(), String> {
-    let mut s = state.write().await;
-    s.read_ids.insert(activity_id);
+    let mut mgr = state.write().await;
+    if let Some(acct) = mgr.accounts.get_mut(&account_id) {
+        acct.read_ids.insert(activity_id);
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn mark_all_read(
     state: tauri::State<'_, SharedPollingState>,
+    account_id: Option<String>,
 ) -> Result<(), String> {
-    let mut s = state.write().await;
-    let all_ids: Vec<String> = s.activities.iter().map(|a| a.id.clone()).collect();
-    for id in all_ids {
-        s.read_ids.insert(id);
+    let mut mgr = state.write().await;
+    match account_id {
+        Some(id) => {
+            if let Some(acct) = mgr.accounts.get_mut(&id) {
+                let all_ids: Vec<String> = acct.activities.iter().map(|a| a.id.clone()).collect();
+                for id in all_ids {
+                    acct.read_ids.insert(id);
+                }
+            }
+        }
+        None => {
+            for acct in mgr.accounts.values_mut() {
+                let all_ids: Vec<String> = acct.activities.iter().map(|a| a.id.clone()).collect();
+                for id in all_ids {
+                    acct.read_ids.insert(id);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -100,18 +157,37 @@ async fn mark_all_read(
 #[tauri::command]
 async fn get_read_ids(
     state: tauri::State<'_, SharedPollingState>,
+    account_id: String,
 ) -> Result<Vec<String>, String> {
-    let s = state.read().await;
-    Ok(s.read_ids.iter().cloned().collect())
+    let mgr = state.read().await;
+    if let Some(acct) = mgr.accounts.get(&account_id) {
+        Ok(acct.read_ids.iter().cloned().collect())
+    } else {
+        Ok(vec![])
+    }
 }
 
 #[tauri::command]
 async fn set_muted_issues(
     state: tauri::State<'_, SharedPollingState>,
     muted_ids: Vec<String>,
+    account_id: Option<String>,
 ) -> Result<(), String> {
-    let mut s = state.write().await;
-    s.muted_issues = muted_ids.into_iter().collect();
+    let mut mgr = state.write().await;
+    match account_id {
+        Some(id) => {
+            if let Some(acct) = mgr.accounts.get_mut(&id) {
+                acct.muted_issues = muted_ids.into_iter().collect();
+            }
+        }
+        None => {
+            // Apply to all accounts (backward compat)
+            let set: std::collections::HashSet<String> = muted_ids.into_iter().collect();
+            for acct in mgr.accounts.values_mut() {
+                acct.muted_issues = set.clone();
+            }
+        }
+    }
     Ok(())
 }
 
@@ -119,30 +195,25 @@ async fn set_muted_issues(
 async fn set_read_ids(
     state: tauri::State<'_, SharedPollingState>,
     read_ids: Vec<String>,
+    account_id: String,
 ) -> Result<(), String> {
-    let mut s = state.write().await;
-    s.read_ids = read_ids.into_iter().collect();
+    let mut mgr = state.write().await;
+    if let Some(acct) = mgr.accounts.get_mut(&account_id) {
+        acct.read_ids = read_ids.into_iter().collect();
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result<u32, String> {
-    let s = state.read().await;
-    let count = s
-        .activities
-        .iter()
-        .filter(|a| !s.read_ids.contains(&a.id))
-        .count() as u32;
-    Ok(count)
+    let mgr = state.read().await;
+    Ok(mgr.total_unread_count())
 }
 
 // --- Tray badge ---
 
 #[tauri::command]
-async fn set_tray_badge(
-    app: tauri::AppHandle,
-    count: u32,
-) -> Result<(), String> {
+async fn set_tray_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
     tray::update_tray_badge(&app, count);
     Ok(())
 }
@@ -212,7 +283,7 @@ async fn get_project_team(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let polling_state: SharedPollingState = Arc::new(RwLock::new(PollingState::new()));
+    let polling_state: SharedPollingState = Arc::new(RwLock::new(PollingManager::new()));
     let project_cache: SharedProjectCache = Arc::new(RwLock::new(cache::ProjectCache::new()));
     let cancel = Arc::new(Mutex::new(()));
 
@@ -229,7 +300,6 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
                     if event.state() == ShortcutState::Pressed {
-                        // Any registered shortcut toggles the main window
                         tray::toggle_window(app);
                     }
                 })
@@ -240,17 +310,13 @@ pub fn run() {
         .manage(polling_state.clone())
         .manage(project_cache)
         .setup(move |app| {
-            // Hide from macOS dock — tray-only app
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            // Set up system tray — if it fails on Windows, show the window
-            // directly so the app isn't completely invisible.
             match tray::setup_tray(app.handle(), polling_state.clone()) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("Failed to set up system tray: {e}");
-                    // Fallback: show the main window so the user can still use the app
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
                         let _ = window.set_focus();
@@ -258,10 +324,6 @@ pub fn run() {
                 }
             }
 
-            // Global shortcut is registered from the frontend (allows user customization).
-            // The Rust handler above will toggle the window for any registered shortcut.
-
-            // Start polling loop
             let handle = app.handle().clone();
             let state = polling_state.clone();
             let cancel = cancel.clone();
@@ -269,7 +331,6 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Hide window instead of closing — tray app stays alive
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -280,6 +341,7 @@ pub fn run() {
             check_connection,
             start_polling,
             stop_polling,
+            remove_account,
             set_focus_state,
             get_activities,
             mark_activity_read,

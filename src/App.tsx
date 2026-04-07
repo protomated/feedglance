@@ -69,7 +69,8 @@ function matchesSearch(activity: ActivityItem, query: string): boolean {
 
 function App() {
   const connectionStatus = useAuthStore((s) => s.connectionStatus);
-  const user = useAuthStore((s) => s.user);
+  const accounts = useAuthStore((s) => s.accounts);
+  const hasAccounts = useAuthStore((s) => s.hasAccounts);
   const credentials = useAuthStore((s) => s.credentials);
   const initialize = useAuthStore((s) => s.initialize);
   const [view, setView] = useState<View>("feed");
@@ -77,11 +78,11 @@ function App() {
   const [showHelp, setShowHelp] = useState(false);
 
   const initNotifications = useNotificationStore((s) => s.initialize);
-  const startPolling = useNotificationStore((s) => s.startPolling);
+  const startAllPolling = useNotificationStore((s) => s.startAllPolling);
   const stopPolling = useNotificationStore((s) => s.stopPolling);
   const setFocusState = useNotificationStore((s) => s.setFocusState);
   const activities = useNotificationStore((s) => s.activities);
-  const readIds = useNotificationStore((s) => s.readIds);
+  const allReadIds = useNotificationStore((s) => s.allReadIds);
   const markRead = useNotificationStore((s) => s.markRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
   const initFilters = useFilterStore((s) => s.initialize);
@@ -89,14 +90,22 @@ function App() {
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
   const mutedIssues = useFilterStore((s) => s.mutedIssues);
   const searchQuery = useFilterStore((s) => s.searchQuery);
+  const selectedAccounts = useFilterStore((s) => s.selectedAccounts);
 
   const [globalShortcut, setGlobalShortcut] = useState(DEFAULT_SHORTCUT);
   const pollingStartedRef = useRef(false);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
 
+  // Compute flat read IDs for filtering
+  const readIds = useMemo(() => allReadIds(), [allReadIds, activities]);
+
   // Compute the flat (filtered) activity list for keyboard navigation
   const flatActivities = useMemo(() => {
     return activities.filter((a) => {
+      // Account filter
+      if (selectedAccounts.size > 0 && a.accountId) {
+        if (!selectedAccounts.has(a.accountId)) return false;
+      }
       if (selectedProjects.size > 0) {
         const pk = resolveProjectKey(a);
         if (!selectedProjects.has(pk)) return false;
@@ -114,7 +123,7 @@ function App() {
       }
       return true;
     });
-  }, [activities, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
+  }, [activities, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
 
   // Unread count derived from filtered activities so badge matches the feed
   const unreadCount = countUnread(flatActivities, readIds);
@@ -124,21 +133,30 @@ function App() {
     invoke("set_tray_badge", { count: unreadCount }).catch(() => {});
   }, [unreadCount]);
 
-  // Keyboard action: open in browser
+  // Keyboard action: open in browser — resolve the correct account's base URL
   const handleKbOpen = useCallback(
     (activityId: string) => {
-      if (!credentials?.url) return;
       const activity = activities.find((a) => a.id === activityId);
       if (!activity) return;
+
+      // Find the correct base URL from the activity's account
+      let baseUrl: string | undefined;
+      if (activity.accountId) {
+        const account = accounts.find((a) => a.id === activity.accountId);
+        baseUrl = account?.url;
+      }
+      if (!baseUrl) baseUrl = credentials?.url;
+      if (!baseUrl) return;
+
       const t = activity.target;
       if (!t) return;
       const idReadable =
         t.idReadable ?? t.issue?.idReadable ?? t.article?.idReadable;
       if (!idReadable) return;
       const path = t.targetType === "Article" ? "articles" : "issue";
-      openUrl(`${credentials.url}/${path}/${idReadable}`);
+      openUrl(`${baseUrl}/${path}/${idReadable}`);
     },
-    [credentials, activities],
+    [accounts, credentials, activities],
   );
 
   // Keyboard actions that emit custom events to trigger UI in NotificationItem
@@ -239,12 +257,8 @@ function App() {
         const shortcut = saved || DEFAULT_SHORTCUT;
         setGlobalShortcut(shortcut);
 
-        // Unregister any previous shortcuts, then register the current one
         await unregisterAll();
-        await register(shortcut, () => {
-          // Handler is in Rust (with_handler) — this JS callback is a no-op.
-          // The Rust handler toggles the window.
-        });
+        await register(shortcut, () => {});
       } catch (e) {
         console.error("Failed to register global shortcut:", e);
       }
@@ -275,7 +289,6 @@ function App() {
       });
     };
 
-    // Delay initial check by 5s to avoid slowing down startup
     const initial = setTimeout(doCheck, 5_000);
     const interval = setInterval(doCheck, 6 * 60 * 60 * 1000);
 
@@ -287,12 +300,17 @@ function App() {
 
   // Initialize notification store and start polling when connected
   useEffect(() => {
-    if (connectionStatus !== "connected" || !credentials) return;
+    if (connectionStatus !== "connected" || !hasAccounts) return;
+
+    const connectedAccounts = accounts.filter(
+      (a) => useAuthStore.getState().connectionStatuses[a.id] === "connected"
+    );
+    if (connectedAccounts.length === 0) return;
 
     const setup = async () => {
       if (!pollingStartedRef.current) {
-        await initNotifications();
-        await startPolling(credentials.url, credentials.token, user?.id);
+        await initNotifications(connectedAccounts);
+        await startAllPolling(connectedAccounts);
         pollingStartedRef.current = true;
       }
     };
@@ -304,11 +322,11 @@ function App() {
         pollingStartedRef.current = false;
       }
     };
-  }, [connectionStatus, credentials, user, initNotifications, startPolling, stopPolling]);
+  }, [connectionStatus, hasAccounts, accounts, initNotifications, startAllPolling, stopPolling]);
 
   // Window focus detection for adaptive poll intervals
   useEffect(() => {
-    if (connectionStatus !== "connected") return;
+    if (!hasAccounts || connectionStatus !== "connected") return;
 
     let idleTimer: ReturnType<typeof setTimeout>;
 
@@ -318,10 +336,8 @@ function App() {
     };
 
     const handleBlur = () => {
-      // Hide window when it loses focus (close on outside click)
       getCurrentWindow().hide();
       setFocusState("minimized");
-      // After 5 minutes of being minimized, switch to idle
       idleTimer = setTimeout(() => {
         setFocusState("idle");
       }, 5 * 60 * 1000);
@@ -335,7 +351,7 @@ function App() {
       window.removeEventListener("blur", handleBlur);
       clearTimeout(idleTimer);
     };
-  }, [connectionStatus, setFocusState]);
+  }, [hasAccounts, connectionStatus, setFocusState]);
 
   // Listen for tray menu events
   useEffect(() => {
@@ -362,7 +378,7 @@ function App() {
     );
   }
 
-  if (connectionStatus === "disconnected" || (!user && connectionStatus !== "connecting")) {
+  if (!hasAccounts && connectionStatus === "disconnected") {
     return <Onboarding />;
   }
 

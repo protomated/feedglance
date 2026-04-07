@@ -150,7 +150,7 @@ interface Props {
   isPinned?: boolean;
   isFocused?: boolean;
   onMarkRead: (id: string) => void;
-  onOpenInBrowser?: (targetId: string, targetType?: string) => void;
+  onOpenInBrowser?: (targetId: string, targetType?: string, accountId?: string) => void;
 }
 
 export function NotificationItem({ activity, isRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
@@ -187,7 +187,7 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
   const handleOpenTarget = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!onOpenInBrowser || !resolved || !resolved.id) return;
-    onOpenInBrowser(resolved.id, resolved.type);
+    onOpenInBrowser(resolved.id, resolved.type, activity.accountId);
   };
 
   const toggleAction = (action: ActiveAction) => {
@@ -321,6 +321,7 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
                     <StatusDropdown
                       issueId={issueId!}
                       projectId={projectId}
+                      accountId={activity.accountId}
                       onClose={() => setActiveAction(null)}
                     />
                   )}
@@ -350,6 +351,7 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
                     <AssignDropdown
                       issueId={issueId!}
                       projectId={projectId}
+                      accountId={activity.accountId}
                       onClose={() => setActiveAction(null)}
                     />
                   )}
@@ -407,6 +409,7 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
         <InlineReply
           issueId={issueId}
           projectId={projectId ?? undefined}
+          accountId={activity.accountId}
           onClose={() => setActiveAction(null)}
         />
       )}

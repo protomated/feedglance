@@ -11,6 +11,17 @@ export interface Credentials {
   token: string;
 }
 
+/** A YouTrack Cloud account with its credentials and user info. */
+export interface Account {
+  /** Deterministic ID derived from the normalized URL. */
+  id: string;
+  url: string;
+  token: string;
+  user: UserInfo;
+  /** User-editable display name; defaults to the hostname. */
+  label?: string;
+}
+
 // --- Epic 3: Quick Actions types ---
 
 /** A state value from a project's custom field bundle. */

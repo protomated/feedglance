@@ -25,6 +25,9 @@ pub struct ActivityItem {
     pub field: Option<ActivityField>,
     #[serde(rename = "$type", default)]
     pub activity_type: Option<String>,
+    /// Account ID this activity belongs to (injected by polling engine, not from API).
+    #[serde(default, skip_deserializing)]
+    pub account_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

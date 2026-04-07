@@ -4,8 +4,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAuthStore } from "../stores/auth";
+import { isValidYouTrackCloudUrl, normalizeUrl } from "../services/validation";
 import { DEFAULT_SHORTCUT } from "../App";
 import type { Update } from "@tauri-apps/plugin-updater";
+import type { Account } from "../types/youtrack";
 
 interface SettingsProps {
   onClose: () => void;
@@ -23,26 +25,23 @@ function keyEventToShortcut(e: KeyboardEvent): string | null {
   if (e.shiftKey) parts.push("Shift");
   if (e.altKey) parts.push("Alt");
 
-  // Need at least one modifier
   if (parts.length === 0) return null;
 
-  // Map the key code to a Tauri key name
   const key = e.code;
   if (key.startsWith("Key")) {
-    parts.push(key.slice(3)); // KeyY → Y
+    parts.push(key.slice(3));
   } else if (key.startsWith("Digit")) {
-    parts.push(key.slice(5)); // Digit1 → 1
+    parts.push(key.slice(5));
   } else if (key.startsWith("F") && /^F\d+$/.test(key)) {
-    parts.push(key); // F1, F2, etc.
+    parts.push(key);
   } else {
-    // Skip pure modifier presses
     return null;
   }
 
   return parts.join("+");
 }
 
-/** Format a shortcut string for display (e.g. "CommandOrControl+Shift+Y" → "Cmd+Shift+Y"). */
+/** Format a shortcut string for display. */
 function formatShortcut(shortcut: string): string {
   return shortcut
     .replace("CommandOrControl", navigator.platform.toUpperCase().includes("MAC") ? "Cmd" : "Ctrl")
@@ -50,18 +49,14 @@ function formatShortcut(shortcut: string): string {
 }
 
 export function Settings({ onClose, globalShortcut, onChangeShortcut, availableUpdate, onUpdateDismissed, onCheckForUpdate }: SettingsProps) {
-  const user = useAuthStore((s) => s.user);
-  const credentials = useAuthStore((s) => s.credentials);
-  const disconnect = useAuthStore((s) => s.disconnect);
-  const connect = useAuthStore((s) => s.connect);
+  const accounts = useAuthStore((s) => s.accounts);
+  const connectionStatuses = useAuthStore((s) => s.connectionStatuses);
+  const removeAccount = useAuthStore((s) => s.removeAccount);
+  const updateToken = useAuthStore((s) => s.updateToken);
+  const addAccount = useAuthStore((s) => s.addAccount);
   const checkHealth = useAuthStore((s) => s.checkHealth);
+  const disconnect = useAuthStore((s) => s.disconnect);
 
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<"success" | "fail" | null>(null);
-  const [showUpdateToken, setShowUpdateToken] = useState(false);
-  const [newToken, setNewToken] = useState("");
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [updating, setUpdating] = useState(false);
   const [autostart, setAutostart] = useState(false);
   const [recording, setRecording] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
@@ -71,6 +66,13 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<string | null>(null);
   const recorderRef = useRef<HTMLButtonElement>(null);
+
+  // Add account form state
+  const [showAddAccount, setShowAddAccount] = useState(false);
+  const [newUrl, setNewUrl] = useState("");
+  const [newToken, setNewToken] = useState("");
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => {});
@@ -91,7 +93,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
       }
 
       const shortcut = keyEventToShortcut(e);
-      if (!shortcut) return; // Pure modifier press — keep recording
+      if (!shortcut) return;
 
       setRecording(false);
       setShortcutError(null);
@@ -116,37 +118,33 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
       }
       setAutostart(!autostart);
     } catch {
-      // Silently ignore if autostart toggle fails
+      // Silently ignore
     }
   };
 
-  const handleTestConnection = async () => {
-    setTesting(true);
-    setTestResult(null);
-    const ok = await checkHealth();
-    setTestResult(ok ? "success" : "fail");
-    setTesting(false);
-  };
-
-  const handleDisconnect = async () => {
-    await disconnect();
-  };
-
-  const handleUpdateToken = async (e: FormEvent) => {
+  const handleAddAccount = async (e: FormEvent) => {
     e.preventDefault();
-    if (!credentials || !newToken.trim()) return;
+    setAddError(null);
 
-    setUpdating(true);
-    setTokenError(null);
+    if (!isValidYouTrackCloudUrl(newUrl)) {
+      setAddError("Please enter a valid YouTrack Cloud URL (e.g. myteam.youtrack.cloud)");
+      return;
+    }
+    if (!newToken.trim()) {
+      setAddError("Please enter your permanent token");
+      return;
+    }
 
+    setAdding(true);
     try {
-      await connect(credentials.url, newToken.trim());
-      setShowUpdateToken(false);
+      await addAccount(normalizeUrl(newUrl), newToken.trim());
+      setShowAddAccount(false);
+      setNewUrl("");
       setNewToken("");
     } catch (e) {
-      setTokenError(e instanceof Error ? e.message : "Invalid token");
+      setAddError(e instanceof Error ? e.message : "Failed to add account");
     } finally {
-      setUpdating(false);
+      setAdding(false);
     }
   };
 
@@ -162,79 +160,64 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
         </button>
       </div>
 
-      {/* Account info */}
+      {/* Accounts */}
       <div className="mb-4">
-        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
-          Account
-        </h3>
-        <div className="flex items-center gap-2.5 p-2.5 rounded-lg bg-gray-100 dark:bg-gray-800">
-          {user?.avatarUrl ? (
-            <img src={user.avatarUrl} alt={user.fullName} className="w-8 h-8 rounded-full" />
-          ) : (
-            <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-semibold">
-              {user?.fullName?.[0] || user?.login?.[0] || "?"}
-            </div>
-          )}
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
-              {user?.fullName || user?.login}
-            </p>
-            <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-              {credentials?.url}
-            </p>
-          </div>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">
+            Accounts
+          </h3>
+          <button
+            onClick={() => setShowAddAccount(!showAddAccount)}
+            className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 transition-colors"
+          >
+            {showAddAccount ? "Cancel" : "+ Add account"}
+          </button>
         </div>
-      </div>
 
-      {/* Connection */}
-      <div className="mb-4">
-        <h3 className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">
-          Connection
-        </h3>
+        {/* Add account form */}
+        {showAddAccount && (
+          <form onSubmit={handleAddAccount} className="mb-3 p-2.5 rounded-lg bg-gray-50 dark:bg-gray-800 space-y-2">
+            <input
+              type="text"
+              value={newUrl}
+              onChange={(e) => setNewUrl(e.target.value)}
+              placeholder="myteam.youtrack.cloud"
+              disabled={adding}
+              className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+            />
+            <input
+              type="password"
+              value={newToken}
+              onChange={(e) => setNewToken(e.target.value)}
+              placeholder="Permanent token"
+              disabled={adding}
+              className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+            />
+            {addError && (
+              <p className="text-xs text-red-500">{addError}</p>
+            )}
+            <button
+              type="submit"
+              disabled={adding}
+              className="w-full py-1.5 px-3 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs transition-colors disabled:opacity-50"
+            >
+              {adding ? "Connecting..." : "Add account"}
+            </button>
+          </form>
+        )}
+
+        {/* Account list */}
         <div className="space-y-2">
-          <button
-            onClick={handleTestConnection}
-            disabled={testing}
-            className="w-full text-left px-3 py-1.5 rounded-md text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
-          >
-            {testing ? "Testing..." : "Test connection"}
-            {testResult === "success" && (
-              <span className="ml-2 text-green-500">OK</span>
-            )}
-            {testResult === "fail" && (
-              <span className="ml-2 text-red-500">Failed</span>
-            )}
-          </button>
-
-          <button
-            onClick={() => setShowUpdateToken(!showUpdateToken)}
-            className="w-full text-left px-3 py-1.5 rounded-md text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-          >
-            Update token
-          </button>
-
-          {showUpdateToken && (
-            <form onSubmit={handleUpdateToken} className="px-3 py-2 space-y-2">
-              <input
-                type="password"
-                value={newToken}
-                onChange={(e) => setNewToken(e.target.value)}
-                placeholder="New permanent token"
-                disabled={updating}
-                className="w-full px-3 py-2 rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-              />
-              {tokenError && (
-                <p className="text-xs text-red-500">{tokenError}</p>
-              )}
-              <button
-                type="submit"
-                disabled={updating || !newToken.trim()}
-                className="w-full py-1.5 px-3 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-sm transition-colors disabled:opacity-50"
-              >
-                {updating ? "Validating..." : "Save new token"}
-              </button>
-            </form>
-          )}
+          {accounts.map((account) => (
+            <AccountCard
+              key={account.id}
+              account={account}
+              status={connectionStatuses[account.id] || "disconnected"}
+              onRemove={() => removeAccount(account.id)}
+              onUpdateToken={(token) => updateToken(account.id, token)}
+              onTestConnection={() => checkHealth(account.id)}
+            />
+          ))}
         </div>
       </div>
 
@@ -399,20 +382,143 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
       </div>
 
       {/* Danger zone */}
-      <div>
-        <h3 className="text-xs font-medium text-red-500 uppercase tracking-wide mb-2">
-          Danger Zone
-        </h3>
-        <button
-          onClick={handleDisconnect}
-          className="w-full text-left px-3 py-1.5 rounded-md text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-        >
-          Disconnect account
-        </button>
-        <p className="px-3 mt-1 text-xs text-gray-400">
-          Removes all credentials and cached data.
-        </p>
-      </div>
+      {accounts.length > 0 && (
+        <div>
+          <h3 className="text-xs font-medium text-red-500 uppercase tracking-wide mb-2">
+            Danger Zone
+          </h3>
+          <button
+            onClick={disconnect}
+            className="w-full text-left px-3 py-1.5 rounded-md text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          >
+            Disconnect all accounts
+          </button>
+          <p className="px-3 mt-1 text-xs text-gray-400">
+            Removes all credentials and cached data.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Per-account card component ---
+
+interface AccountCardProps {
+  account: Account;
+  status: string;
+  onRemove: () => void;
+  onUpdateToken: (token: string) => Promise<void>;
+  onTestConnection: () => Promise<boolean>;
+}
+
+function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnection }: AccountCardProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<"success" | "fail" | null>(null);
+  const [showUpdateToken, setShowUpdateToken] = useState(false);
+  const [newToken, setNewToken] = useState("");
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
+
+  const statusColor = status === "connected" ? "bg-green-500" : status === "error" ? "bg-red-500" : "bg-yellow-400";
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    const ok = await onTestConnection();
+    setTestResult(ok ? "success" : "fail");
+    setTesting(false);
+  };
+
+  const handleUpdateToken = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!newToken.trim()) return;
+    setUpdating(true);
+    setTokenError(null);
+    try {
+      await onUpdateToken(newToken.trim());
+      setShowUpdateToken(false);
+      setNewToken("");
+    } catch (e) {
+      setTokenError(e instanceof Error ? e.message : "Invalid token");
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  return (
+    <div className="rounded-lg bg-gray-100 dark:bg-gray-800 overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2.5 p-2.5 text-left"
+      >
+        {account.user?.avatarUrl ? (
+          <img src={account.user.avatarUrl} alt={account.user.fullName} className="w-8 h-8 rounded-full" />
+        ) : (
+          <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm font-semibold">
+            {account.user?.fullName?.[0] || account.label?.[0] || "?"}
+          </div>
+        )}
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+            {account.user?.fullName || account.label}
+          </p>
+          <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
+            {account.url}
+          </p>
+        </div>
+        <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
+      </button>
+
+      {expanded && (
+        <div className="px-2.5 pb-2.5 space-y-1.5">
+          <button
+            onClick={handleTest}
+            disabled={testing}
+            className="w-full text-left px-2 py-1 rounded text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
+          >
+            {testing ? "Testing..." : "Test connection"}
+            {testResult === "success" && <span className="ml-2 text-green-500">OK</span>}
+            {testResult === "fail" && <span className="ml-2 text-red-500">Failed</span>}
+          </button>
+
+          <button
+            onClick={() => setShowUpdateToken(!showUpdateToken)}
+            className="w-full text-left px-2 py-1 rounded text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+          >
+            Update token
+          </button>
+
+          {showUpdateToken && (
+            <form onSubmit={handleUpdateToken} className="px-2 py-1 space-y-1.5">
+              <input
+                type="password"
+                value={newToken}
+                onChange={(e) => setNewToken(e.target.value)}
+                placeholder="New permanent token"
+                disabled={updating}
+                className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
+              />
+              {tokenError && <p className="text-xs text-red-500">{tokenError}</p>}
+              <button
+                type="submit"
+                disabled={updating || !newToken.trim()}
+                className="w-full py-1 px-2 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs transition-colors disabled:opacity-50"
+              >
+                {updating ? "Validating..." : "Save"}
+              </button>
+            </form>
+          )}
+
+          <button
+            onClick={onRemove}
+            className="w-full text-left px-2 py-1 rounded text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+          >
+            Remove account
+          </button>
+        </div>
+      )}
     </div>
   );
 }
