@@ -49,6 +49,8 @@ export interface ActivityItem {
   removed: unknown;
   field?: ActivityField;
   activityType?: string; // $type from API
+  /** Account ID this activity belongs to (injected by polling engine). */
+  accountId?: string;
 }
 
 /** Category IDs matching YouTrack API. */

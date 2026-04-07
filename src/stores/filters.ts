@@ -7,6 +7,7 @@ const STORE_NAME = "filters.json";
 const KEY_PROJECTS = "selected_projects";
 const KEY_TYPES = "selected_types";
 const KEY_MUTED = "muted_issues";
+const KEY_ACCOUNTS = "selected_accounts";
 
 interface FilterState {
   /** Selected project keys to show (empty = show all). */
@@ -15,6 +16,8 @@ interface FilterState {
   selectedTypes: Set<ActivityCategoryId>;
   /** Muted issue IDs (always hidden). */
   mutedIssues: Set<string>;
+  /** Selected account IDs to show (empty = show all). */
+  selectedAccounts: Set<string>;
   /** Text search query. */
   searchQuery: string;
 
@@ -24,6 +27,8 @@ interface FilterState {
   toggleProject: (projectKey: string) => void;
   /** Toggle a category type filter. */
   toggleType: (typeId: ActivityCategoryId) => void;
+  /** Toggle an account filter. */
+  toggleAccount: (accountId: string) => void;
   /** Mute an issue by its readable ID. */
   muteIssue: (issueId: string) => void;
   /** Unmute an issue. */
@@ -46,7 +51,7 @@ async function getStore() {
 /** Sync muted issue IDs to the backend so OS notifications skip them. */
 async function syncMutedToBackend(muted: Set<string>) {
   try {
-    await invoke("set_muted_issues", { mutedIds: Array.from(muted) });
+    await invoke("set_muted_issues", { mutedIds: Array.from(muted), accountId: null });
   } catch {
     // Backend may not be ready yet — will sync on next change
   }
@@ -56,11 +61,13 @@ async function persist(
   projects: Set<string>,
   types: Set<ActivityCategoryId>,
   muted: Set<string>,
+  accounts: Set<string>,
 ) {
   const store = await getStore();
   await store.set(KEY_PROJECTS, Array.from(projects));
   await store.set(KEY_TYPES, Array.from(types));
   await store.set(KEY_MUTED, Array.from(muted));
+  await store.set(KEY_ACCOUNTS, Array.from(accounts));
   await store.save();
   syncMutedToBackend(muted);
 }
@@ -69,6 +76,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
   selectedProjects: new Set(),
   selectedTypes: new Set(),
   mutedIssues: new Set(),
+  selectedAccounts: new Set(),
   searchQuery: "",
 
   initialize: async () => {
@@ -77,11 +85,13 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       const projects = await store.get<string[]>(KEY_PROJECTS);
       const types = await store.get<string[]>(KEY_TYPES);
       const muted = await store.get<string[]>(KEY_MUTED);
+      const accounts = await store.get<string[]>(KEY_ACCOUNTS);
       const mutedSet = new Set(muted ?? []);
       set({
         selectedProjects: new Set(projects ?? []),
         selectedTypes: new Set((types ?? []) as ActivityCategoryId[]),
         mutedIssues: mutedSet,
+        selectedAccounts: new Set(accounts ?? []),
       });
       syncMutedToBackend(mutedSet);
     } catch {
@@ -98,7 +108,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       next.add(projectKey);
     }
     set({ selectedProjects: next });
-    persist(next, s.selectedTypes, s.mutedIssues);
+    persist(next, s.selectedTypes, s.mutedIssues, s.selectedAccounts);
   },
 
   toggleType: (typeId: ActivityCategoryId) => {
@@ -110,7 +120,19 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       next.add(typeId);
     }
     set({ selectedTypes: next });
-    persist(s.selectedProjects, next, s.mutedIssues);
+    persist(s.selectedProjects, next, s.mutedIssues, s.selectedAccounts);
+  },
+
+  toggleAccount: (accountId: string) => {
+    const s = get();
+    const next = new Set(s.selectedAccounts);
+    if (next.has(accountId)) {
+      next.delete(accountId);
+    } else {
+      next.add(accountId);
+    }
+    set({ selectedAccounts: next });
+    persist(s.selectedProjects, s.selectedTypes, s.mutedIssues, next);
   },
 
   muteIssue: (issueId: string) => {
@@ -118,7 +140,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     const next = new Set(s.mutedIssues);
     next.add(issueId);
     set({ mutedIssues: next });
-    persist(s.selectedProjects, s.selectedTypes, next);
+    persist(s.selectedProjects, s.selectedTypes, next, s.selectedAccounts);
   },
 
   unmuteIssue: (issueId: string) => {
@@ -126,7 +148,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     const next = new Set(s.mutedIssues);
     next.delete(issueId);
     set({ mutedIssues: next });
-    persist(s.selectedProjects, s.selectedTypes, next);
+    persist(s.selectedProjects, s.selectedTypes, next, s.selectedAccounts);
   },
 
   setSearchQuery: (query: string) => {
@@ -140,8 +162,9 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       selectedProjects: empty,
       selectedTypes: emptyTypes,
       mutedIssues: new Set(),
+      selectedAccounts: new Set(),
       searchQuery: "",
     });
-    persist(empty, emptyTypes, new Set());
+    persist(empty, emptyTypes, new Set(), new Set());
   },
 }));

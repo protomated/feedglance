@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
@@ -36,12 +36,10 @@ impl FocusState {
     }
 }
 
-/// Shared state for the polling engine.
-pub struct PollingState {
-    /// Whether polling is active.
+/// Per-account polling state.
+pub struct AccountPollingState {
+    /// Whether polling is active for this account.
     pub running: bool,
-    /// Current focus state determining poll interval.
-    pub focus_state: FocusState,
     /// Timestamp watermark (unix ms) — poll activities after this.
     pub watermark: i64,
     /// Set of seen activity IDs for deduplication.
@@ -61,28 +59,66 @@ pub struct PollingState {
     pub consecutive_failures: u32,
 }
 
-impl PollingState {
-    pub fn new() -> Self {
+impl AccountPollingState {
+    pub fn new(url: String, token: String, current_user_id: String) -> Self {
         Self {
-            running: false,
-            focus_state: FocusState::Focused,
+            running: true,
             watermark: 0,
             seen_ids: HashSet::new(),
             activities: Vec::new(),
             read_ids: HashSet::new(),
             muted_issues: HashSet::new(),
-            current_user_id: String::new(),
-            url: String::new(),
-            token: String::new(),
+            current_user_id,
+            url,
+            token,
             consecutive_failures: 0,
         }
     }
 }
 
-pub type SharedPollingState = Arc<RwLock<PollingState>>;
+/// Manager holding all account polling states and global focus state.
+pub struct PollingManager {
+    pub accounts: HashMap<String, AccountPollingState>,
+    pub focus_state: FocusState,
+}
+
+impl PollingManager {
+    pub fn new() -> Self {
+        Self {
+            accounts: HashMap::new(),
+            focus_state: FocusState::Focused,
+        }
+    }
+
+    /// Get merged activities from all accounts, sorted by timestamp descending.
+    pub fn all_activities(&self) -> Vec<ActivityItem> {
+        let mut all: Vec<ActivityItem> = self
+            .accounts
+            .values()
+            .flat_map(|a| a.activities.iter().cloned())
+            .collect();
+        all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all
+    }
+
+    /// Get total unread count across all accounts.
+    pub fn total_unread_count(&self) -> u32 {
+        self.accounts
+            .values()
+            .map(|a| {
+                a.activities
+                    .iter()
+                    .filter(|act| !a.read_ids.contains(&act.id))
+                    .count() as u32
+            })
+            .sum()
+    }
+}
+
+pub type SharedPollingState = Arc<RwLock<PollingManager>>;
 
 /// Start the background polling loop.
-/// The `cancel` mutex is used to signal the loop to stop — when `running` is set to false.
+/// Iterates over all accounts each cycle.
 pub fn start_polling_loop(
     app_handle: AppHandle,
     state: SharedPollingState,
@@ -90,142 +126,173 @@ pub fn start_polling_loop(
 ) {
     tauri::async_runtime::spawn(async move {
         loop {
-            let (should_run, interval_secs, url, token, watermark, consecutive_failures) = {
-                let s = state.read().await;
-                (
-                    s.running,
-                    s.focus_state.interval_secs(),
-                    s.url.clone(),
-                    s.token.clone(),
-                    s.watermark,
-                    s.consecutive_failures,
-                )
+            // Snapshot account info and global settings
+            let (account_snapshots, interval_secs) = {
+                let mgr = state.read().await;
+                let interval = mgr.focus_state.interval_secs();
+                let snapshots: Vec<(String, String, String, i64, u32, String, HashSet<String>)> = mgr
+                    .accounts
+                    .iter()
+                    .filter(|(_, a)| a.running && !a.url.is_empty() && !a.token.is_empty())
+                    .map(|(id, a)| {
+                        (
+                            id.clone(),
+                            a.url.clone(),
+                            a.token.clone(),
+                            a.watermark,
+                            a.consecutive_failures,
+                            a.current_user_id.clone(),
+                            a.muted_issues.clone(),
+                        )
+                    })
+                    .collect();
+                (snapshots, interval)
             };
 
-            if !should_run || url.is_empty() || token.is_empty() {
-                // Not configured or stopped — wait and re-check.
+            if account_snapshots.is_empty() {
+                // No active accounts — wait and re-check.
                 sleep(Duration::from_secs(2)).await;
                 continue;
             }
 
-            // Calculate actual interval with exponential backoff on failures
-            let actual_interval = if consecutive_failures > 0 {
-                let backoff = interval_secs * 2u64.pow(consecutive_failures.min(5));
-                backoff.min(300) // Cap at 5 minutes
+            // Calculate actual interval with max backoff across all accounts
+            let max_failures = account_snapshots
+                .iter()
+                .map(|(_, _, _, _, f, _, _)| *f)
+                .max()
+                .unwrap_or(0);
+            let actual_interval = if max_failures > 0 {
+                let backoff = interval_secs * 2u64.pow(max_failures.min(5));
+                backoff.min(300)
             } else {
                 interval_secs
             };
 
             sleep(Duration::from_secs(actual_interval)).await;
 
-            // Re-check running state after sleep
+            // Re-check that manager still has running accounts after sleep
             {
-                let s = state.read().await;
-                if !s.running {
+                let mgr = state.read().await;
+                if mgr.accounts.values().all(|a| !a.running) {
                     continue;
                 }
             }
 
-            // Perform the poll
-            let client = YouTrackClient::new(&url, &token);
+            // Poll each account
+            for (account_id, url, token, watermark, _consecutive_failures, current_user_id, muted_issues) in &account_snapshots {
+                let client = YouTrackClient::new(url, token);
 
-            // Use watermark for subsequent polls, or 24h ago for initial load
-            let is_initial_load = watermark == 0;
-            let start = if watermark > 0 {
-                watermark + 1 // +1 to avoid re-fetching the last seen activity
-            } else {
-                let now = chrono::Utc::now().timestamp_millis();
-                now - INITIAL_WINDOW_MS
-            };
+                let is_initial_load = *watermark == 0;
+                let start = if *watermark > 0 {
+                    watermark + 1
+                } else {
+                    let now = chrono::Utc::now().timestamp_millis();
+                    now - INITIAL_WINDOW_MS
+                };
 
-            match client.get_activities(start, ACTIVITIES_PER_PAGE).await {
-                Ok(new_activities) => {
-                    let mut s = state.write().await;
-                    s.consecutive_failures = 0;
+                match client.get_activities(start, ACTIVITIES_PER_PAGE).await {
+                    Ok(new_activities) => {
+                        let mut mgr = state.write().await;
+                        let Some(acct) = mgr.accounts.get_mut(account_id) else {
+                            continue;
+                        };
+                        acct.consecutive_failures = 0;
 
-                    let mut new_count = 0u32;
-                    let mut non_muted_new_count = 0u32;
+                        let mut new_count = 0u32;
+                        let mut non_muted_new_count = 0u32;
 
-                    for activity in new_activities {
-                        // Skip current user's own activities
-                        if !s.current_user_id.is_empty() {
-                            if let Some(ref author) = activity.author {
-                                if author.id == s.current_user_id {
+                        for mut activity in new_activities {
+                            // Stamp the account ID
+                            activity.account_id = account_id.clone();
+
+                            // Skip current user's own activities
+                            if !current_user_id.is_empty() {
+                                if let Some(ref author) = activity.author {
+                                    if author.id == *current_user_id {
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            // Deduplication
+                            if acct.seen_ids.contains(&activity.id) {
+                                continue;
+                            }
+
+                            // Update watermark
+                            if activity.timestamp > acct.watermark {
+                                acct.watermark = activity.timestamp;
+                            }
+
+                            // Check if this activity's issue is muted
+                            let is_muted = resolve_issue_id_readable(&activity)
+                                .map(|id| muted_issues.contains(&id))
+                                .unwrap_or(false);
+
+                            acct.seen_ids.insert(activity.id.clone());
+                            acct.activities.insert(0, activity);
+                            new_count += 1;
+                            if !is_muted {
+                                non_muted_new_count += 1;
+                            }
+                        }
+
+                        // Prune old activities (keep last 500 per account)
+                        if acct.activities.len() > 500 {
+                            let removed: Vec<_> = acct.activities.drain(500..).collect();
+                            for r in &removed {
+                                acct.seen_ids.remove(&r.id);
+                            }
+                        }
+
+                        // Prune read_ids
+                        if acct.read_ids.len() > 5000 {
+                            acct.read_ids.clear();
+                        }
+
+                        drop(mgr);
+
+                        // Emit event with account context
+                        let _ = app_handle.emit(
+                            "activities-updated",
+                            serde_json::json!({
+                                "accountId": account_id,
+                                "count": new_count,
+                            }),
+                        );
+
+                        // Send OS notification only for non-muted new activities
+                        if non_muted_new_count > 0 && !is_initial_load {
+                            send_os_notification(&app_handle, non_muted_new_count);
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = e.to_string();
+                        let mut mgr = state.write().await;
+                        if let Some(acct) = mgr.accounts.get_mut(account_id) {
+                            acct.consecutive_failures += 1;
+                        }
+
+                        if err_msg.starts_with("RATE_LIMITED:") {
+                            if let Some(secs_str) = err_msg.strip_prefix("RATE_LIMITED:") {
+                                if let Ok(secs) = secs_str.parse::<u64>() {
+                                    drop(mgr);
+                                    sleep(Duration::from_secs(secs)).await;
                                     continue;
                                 }
                             }
                         }
 
-                        // Deduplication
-                        if s.seen_ids.contains(&activity.id) {
-                            continue;
-                        }
+                        drop(mgr);
 
-                        // Update watermark to the latest timestamp
-                        if activity.timestamp > s.watermark {
-                            s.watermark = activity.timestamp;
-                        }
-
-                        // Check if this activity's issue is muted
-                        let is_muted = resolve_issue_id_readable(&activity)
-                            .map(|id| s.muted_issues.contains(&id))
-                            .unwrap_or(false);
-
-                        s.seen_ids.insert(activity.id.clone());
-                        s.activities.insert(0, activity); // Newest first
-                        new_count += 1;
-                        if !is_muted {
-                            non_muted_new_count += 1;
-                        }
+                        let _ = app_handle.emit(
+                            "poll-error",
+                            serde_json::json!({
+                                "accountId": account_id,
+                                "error": err_msg,
+                            }),
+                        );
                     }
-
-                    // Prune old activities (keep last 500)
-                    if s.activities.len() > 500 {
-                        let removed: Vec<_> = s.activities.drain(500..).collect();
-                        for r in &removed {
-                            s.seen_ids.remove(&r.id);
-                        }
-                    }
-
-                    // Prune read_ids older than 30 days
-                    // (We'll do this on a simple size cap since we don't track per-id timestamps)
-                    if s.read_ids.len() > 5000 {
-                        s.read_ids.clear();
-                    }
-
-                    drop(s);
-
-                    // Tray badge is updated by the frontend (via set_tray_badge)
-                    // using the filtered unread count so it matches the feed.
-
-                    // Emit event to frontend with the new activity count
-                    let _ = app_handle.emit("activities-updated", new_count);
-
-                    // Send OS notification only for non-muted new activities
-                    // Skip on initial load — those are catch-up activities, not genuinely new
-                    if non_muted_new_count > 0 && !is_initial_load {
-                        send_os_notification(&app_handle, non_muted_new_count);
-                    }
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    let mut s = state.write().await;
-                    s.consecutive_failures += 1;
-
-                    if err_msg.starts_with("RATE_LIMITED:") {
-                        // Parse retry-after and apply extra delay
-                        if let Some(secs_str) = err_msg.strip_prefix("RATE_LIMITED:") {
-                            if let Ok(secs) = secs_str.parse::<u64>() {
-                                drop(s);
-                                sleep(Duration::from_secs(secs)).await;
-                                continue;
-                            }
-                        }
-                    }
-
-                    drop(s);
-
-                    let _ = app_handle.emit("poll-error", err_msg);
                 }
             }
         }
@@ -233,17 +300,17 @@ pub fn start_polling_loop(
 }
 
 /// Resolve the readable issue ID for an activity (e.g. "PROJ-123").
-/// Mirrors the frontend's `resolveIssueIdForFilter` logic.
 fn resolve_issue_id_readable(activity: &ActivityItem) -> Option<String> {
     let t = activity.target.as_ref()?;
-    // Direct issue target (not a comment or article)
     if let Some(ref id_readable) = t.id_readable {
         let target_type = t.target_type.as_deref().unwrap_or("");
-        if target_type != "IssueComment" && target_type != "ArticleComment" && target_type != "Article" {
+        if target_type != "IssueComment"
+            && target_type != "ArticleComment"
+            && target_type != "Article"
+        {
             return Some(id_readable.clone());
         }
     }
-    // Parent issue
     if let Some(ref issue) = t.issue {
         if let Some(ref id_readable) = issue.id_readable {
             return Some(id_readable.clone());

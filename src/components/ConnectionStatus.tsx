@@ -20,16 +20,20 @@ const MAX_BACKOFF = 300_000; // 5 min
 
 export function ConnectionStatus({ onClickError }: { onClickError?: () => void }) {
   const status = useAuthStore((s) => s.connectionStatus);
+  const accounts = useAuthStore((s) => s.accounts);
   const consecutiveFailures = useAuthStore((s) => s.consecutiveFailures);
   const checkHealth = useAuthStore((s) => s.checkHealth);
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
+  // Use max consecutive failures across all accounts for backoff
+  const maxFailures = Object.values(consecutiveFailures).reduce((max, f) => Math.max(max, f), 0);
+
   useEffect(() => {
-    if (status === "disconnected") return;
+    if (status === "disconnected" || accounts.length === 0) return;
 
     const scheduleCheck = () => {
       const backoff = Math.min(
-        HEALTH_CHECK_INTERVAL * Math.pow(2, consecutiveFailures),
+        HEALTH_CHECK_INTERVAL * Math.pow(2, maxFailures),
         MAX_BACKOFF
       );
       timerRef.current = setTimeout(async () => {
@@ -43,9 +47,12 @@ export function ConnectionStatus({ onClickError }: { onClickError?: () => void }
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, [status, consecutiveFailures, checkHealth]);
+  }, [status, maxFailures, checkHealth, accounts.length]);
 
   if (status === "disconnected") return null;
+
+  // Show account count when multiple accounts
+  const accountInfo = accounts.length > 1 ? ` (${accounts.length})` : "";
 
   return (
     <button
@@ -53,12 +60,12 @@ export function ConnectionStatus({ onClickError }: { onClickError?: () => void }
       className={`flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 ${
         status === "error" ? "cursor-pointer hover:text-red-500" : "cursor-default"
       }`}
-      title={status === "error" && consecutiveFailures >= 3 ? "Click to open settings" : undefined}
+      title={status === "error" && maxFailures >= 3 ? "Click to open settings" : undefined}
     >
       <span className={`inline-block w-2 h-2 rounded-full ${STATUS_COLORS[status]}`} />
-      <span>{STATUS_LABELS[status]}</span>
-      {status === "error" && consecutiveFailures >= 3 && (
-        <span className="text-red-500 font-medium ml-1">— Check settings</span>
+      <span>{STATUS_LABELS[status]}{accountInfo}</span>
+      {status === "error" && maxFailures >= 3 && (
+        <span className="text-red-500 font-medium ml-1">-- Check settings</span>
       )}
     </button>
   );

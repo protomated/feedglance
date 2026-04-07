@@ -7,7 +7,7 @@ interface Props {
   pinnedIds: Set<string>;
   focusedActivityId?: string | null;
   onMarkRead: (id: string) => void;
-  onOpenInBrowser: (targetId: string, targetType?: string) => void;
+  onOpenInBrowser: (targetId: string, targetType?: string, accountId?: string) => void;
 }
 
 export function NotificationGroup({

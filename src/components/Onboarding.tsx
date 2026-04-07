@@ -74,7 +74,7 @@ export function Onboarding() {
           YouTrackd
         </h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
-          Connect your YouTrack Cloud instance to get started.
+          Add a YouTrack Cloud account to get started.
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">

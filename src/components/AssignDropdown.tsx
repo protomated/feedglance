@@ -8,17 +8,20 @@ import type { TeamMember, CommandResult } from "../types/youtrack";
 interface Props {
   issueId: string;
   projectId: string;
+  accountId?: string;
   onClose: () => void;
 }
 
-export function AssignDropdown({ issueId, projectId, onClose }: Props) {
+export function AssignDropdown({ issueId, projectId, accountId, onClose }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [filtered, setFiltered] = useState<TeamMember[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const credentials = useAuthStore((s) => s.credentials);
+  const getAccountCredentials = useAuthStore((s) => s.getAccountCredentials);
+  const legacyCredentials = useAuthStore((s) => s.credentials);
+  const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
   const refresh = useNotificationStore((s) => s.refresh);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
