@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.0...youtrackd-v0.4.1) (2026-04-09)
+
+
+### Bug Fixes
+
+* mark-as-read not updating UI after multi-account refactor ([cbaece7](https://github.com/protomated/youtrackd/commit/cbaece7dab127d0fbc665f4bb7720de1f6919e38))
+
 ## [0.4.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.3.1...youtrackd-v0.4.0) (2026-04-07)
 
 
