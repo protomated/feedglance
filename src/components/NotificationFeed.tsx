@@ -58,6 +58,7 @@ interface Props {
 export function NotificationFeed({ focusedActivityId }: Props) {
   const loading = useNotificationStore((s) => s.loading);
   const activities = useNotificationStore((s) => s.activities);
+  const readIdsMap = useNotificationStore((s) => s.readIds);
   const allReadIds = useNotificationStore((s) => s.allReadIds);
   const markRead = useNotificationStore((s) => s.markRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
@@ -78,7 +79,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
 
   // Compute flat read IDs for display
-  const readIds = useMemo(() => allReadIds(), [allReadIds, activities]);
+  const readIds = useMemo(() => allReadIds(), [readIdsMap]);
 
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
