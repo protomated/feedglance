@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.3.1...youtrackd-v0.4.0) (2026-04-07)
+
+
+### Features
+
+* add multi-account support for multiple YouTrack instances ([424042c](https://github.com/protomated/youtrackd/commit/424042c551f0621fdef8237158d7702071ebfedf))
+
 ## [0.3.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.3.0...youtrackd-v0.3.1) (2026-04-02)
 
 
