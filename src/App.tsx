@@ -82,6 +82,7 @@ function App() {
   const stopPolling = useNotificationStore((s) => s.stopPolling);
   const setFocusState = useNotificationStore((s) => s.setFocusState);
   const activities = useNotificationStore((s) => s.activities);
+  const readIdsMap = useNotificationStore((s) => s.readIds);
   const allReadIds = useNotificationStore((s) => s.allReadIds);
   const markRead = useNotificationStore((s) => s.markRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
@@ -96,8 +97,9 @@ function App() {
   const pollingStartedRef = useRef(false);
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
 
-  // Compute flat read IDs for filtering
-  const readIds = useMemo(() => allReadIds(), [allReadIds, activities]);
+  // Compute flat read IDs for filtering. Depend on readIdsMap so this
+  // recomputes whenever the store's read IDs change (e.g. after markRead).
+  const readIds = useMemo(() => allReadIds(), [readIdsMap]);
 
   // Compute the flat (filtered) activity list for keyboard navigation
   const flatActivities = useMemo(() => {
