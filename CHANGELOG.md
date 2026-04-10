@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.1...youtrackd-v0.4.2) (2026-04-10)
+
+
+### Bug Fixes
+
+* toolbar unread count not updating on mark-as-read ([3f931e8](https://github.com/protomated/youtrackd/commit/3f931e858a0cb11e1a1fcdf5214f288b3fd772d2))
+
 ## [0.4.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.0...youtrackd-v0.4.1) (2026-04-09)
 
 
