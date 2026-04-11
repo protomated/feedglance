@@ -7,12 +7,14 @@ import type { CommandResult, TeamMember } from "../types/youtrack";
 
 interface Props {
   issueId: string;
+  activityId?: string;
   projectId?: string;
   accountId?: string;
+  isRead?: boolean;
   onClose: () => void;
 }
 
-export function InlineReply({ issueId, projectId, accountId, onClose }: Props) {
+export function InlineReply({ issueId, activityId, projectId, accountId, isRead, onClose }: Props) {
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -20,6 +22,7 @@ export function InlineReply({ issueId, projectId, accountId, onClose }: Props) {
   const legacyCredentials = useAuthStore((s) => s.credentials);
   const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
   const refresh = useNotificationStore((s) => s.refresh);
+  const markRead = useNotificationStore((s) => s.markRead);
 
   // @mention state
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -143,6 +146,9 @@ export function InlineReply({ issueId, projectId, accountId, onClose }: Props) {
         text: text.trim(),
       });
       showToast("success", `Comment posted on ${issueId}`);
+      if (activityId && !isRead) {
+        await markRead(activityId, accountId);
+      }
       onClose();
       await refresh();
     } catch (e) {

@@ -408,8 +408,10 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
       {activeAction === "reply" && issueId && (
         <InlineReply
           issueId={issueId}
+          activityId={activity.id}
           projectId={projectId ?? undefined}
           accountId={activity.accountId}
+          isRead={isRead}
           onClose={() => setActiveAction(null)}
         />
       )}
