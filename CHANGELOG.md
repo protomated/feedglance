@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.2...youtrackd-v0.4.3) (2026-04-11)
+
+
+### Bug Fixes
+
+* auto mark-as-read when replying to a notification ([b8cedd0](https://github.com/protomated/youtrackd/commit/b8cedd06c8c5f6e5216882ee65c9a706b6f61f96))
+
 ## [0.4.2](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.1...youtrackd-v0.4.2) (2026-04-10)
 
 
