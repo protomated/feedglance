@@ -128,6 +128,19 @@ async fn mark_activity_read(
 }
 
 #[tauri::command]
+async fn mark_activity_unread(
+    state: tauri::State<'_, SharedPollingState>,
+    activity_id: String,
+    account_id: String,
+) -> Result<(), String> {
+    let mut mgr = state.write().await;
+    if let Some(acct) = mgr.accounts.get_mut(&account_id) {
+        acct.read_ids.remove(&activity_id);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn mark_all_read(
     state: tauri::State<'_, SharedPollingState>,
     account_id: Option<String>,
@@ -345,6 +358,7 @@ pub fn run() {
             set_focus_state,
             get_activities,
             mark_activity_read,
+            mark_activity_unread,
             mark_all_read,
             get_read_ids,
             get_unread_count,

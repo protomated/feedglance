@@ -8,6 +8,10 @@ const KEY_PROJECTS = "selected_projects";
 const KEY_TYPES = "selected_types";
 const KEY_MUTED = "muted_issues";
 const KEY_ACCOUNTS = "selected_accounts";
+const KEY_VIEW_MODE = "view_mode";
+const KEY_ASSIGNED_ONLY = "assigned_to_me_only";
+
+export type ViewMode = "unread" | "all";
 
 interface FilterState {
   /** Selected project keys to show (empty = show all). */
@@ -20,6 +24,10 @@ interface FilterState {
   selectedAccounts: Set<string>;
   /** Text search query. */
   searchQuery: string;
+  /** Which items to show: unread-only (default) or all. */
+  viewMode: ViewMode;
+  /** When true, show only activities that assigned an issue to the current user. */
+  assignedToMeOnly: boolean;
 
   /** Load persisted filters from store. */
   initialize: () => Promise<void>;
@@ -35,6 +43,10 @@ interface FilterState {
   unmuteIssue: (issueId: string) => void;
   /** Set the search query string. */
   setSearchQuery: (query: string) => void;
+  /** Set the view mode (unread / all). */
+  setViewMode: (mode: ViewMode) => void;
+  /** Toggle the assigned-to-me filter. */
+  toggleAssignedToMe: () => void;
   /** Clear all filters. */
   clearAll: () => void;
 }
@@ -62,12 +74,16 @@ async function persist(
   types: Set<ActivityCategoryId>,
   muted: Set<string>,
   accounts: Set<string>,
+  viewMode: ViewMode,
+  assignedToMeOnly: boolean,
 ) {
   const store = await getStore();
   await store.set(KEY_PROJECTS, Array.from(projects));
   await store.set(KEY_TYPES, Array.from(types));
   await store.set(KEY_MUTED, Array.from(muted));
   await store.set(KEY_ACCOUNTS, Array.from(accounts));
+  await store.set(KEY_VIEW_MODE, viewMode);
+  await store.set(KEY_ASSIGNED_ONLY, assignedToMeOnly);
   await store.save();
   syncMutedToBackend(muted);
 }
@@ -78,6 +94,8 @@ export const useFilterStore = create<FilterState>((set, get) => ({
   mutedIssues: new Set(),
   selectedAccounts: new Set(),
   searchQuery: "",
+  viewMode: "unread",
+  assignedToMeOnly: false,
 
   initialize: async () => {
     try {
@@ -86,12 +104,16 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       const types = await store.get<string[]>(KEY_TYPES);
       const muted = await store.get<string[]>(KEY_MUTED);
       const accounts = await store.get<string[]>(KEY_ACCOUNTS);
+      const viewMode = await store.get<ViewMode>(KEY_VIEW_MODE);
+      const assignedToMeOnly = await store.get<boolean>(KEY_ASSIGNED_ONLY);
       const mutedSet = new Set(muted ?? []);
       set({
         selectedProjects: new Set(projects ?? []),
         selectedTypes: new Set((types ?? []) as ActivityCategoryId[]),
         mutedIssues: mutedSet,
         selectedAccounts: new Set(accounts ?? []),
+        viewMode: viewMode === "all" ? "all" : "unread",
+        assignedToMeOnly: assignedToMeOnly === true,
       });
       syncMutedToBackend(mutedSet);
     } catch {
@@ -108,7 +130,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       next.add(projectKey);
     }
     set({ selectedProjects: next });
-    persist(next, s.selectedTypes, s.mutedIssues, s.selectedAccounts);
+    persist(next, s.selectedTypes, s.mutedIssues, s.selectedAccounts, s.viewMode, s.assignedToMeOnly);
   },
 
   toggleType: (typeId: ActivityCategoryId) => {
@@ -120,7 +142,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       next.add(typeId);
     }
     set({ selectedTypes: next });
-    persist(s.selectedProjects, next, s.mutedIssues, s.selectedAccounts);
+    persist(s.selectedProjects, next, s.mutedIssues, s.selectedAccounts, s.viewMode, s.assignedToMeOnly);
   },
 
   toggleAccount: (accountId: string) => {
@@ -132,7 +154,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       next.add(accountId);
     }
     set({ selectedAccounts: next });
-    persist(s.selectedProjects, s.selectedTypes, s.mutedIssues, next);
+    persist(s.selectedProjects, s.selectedTypes, s.mutedIssues, next, s.viewMode, s.assignedToMeOnly);
   },
 
   muteIssue: (issueId: string) => {
@@ -140,7 +162,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     const next = new Set(s.mutedIssues);
     next.add(issueId);
     set({ mutedIssues: next });
-    persist(s.selectedProjects, s.selectedTypes, next, s.selectedAccounts);
+    persist(s.selectedProjects, s.selectedTypes, next, s.selectedAccounts, s.viewMode, s.assignedToMeOnly);
   },
 
   unmuteIssue: (issueId: string) => {
@@ -148,11 +170,24 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     const next = new Set(s.mutedIssues);
     next.delete(issueId);
     set({ mutedIssues: next });
-    persist(s.selectedProjects, s.selectedTypes, next, s.selectedAccounts);
+    persist(s.selectedProjects, s.selectedTypes, next, s.selectedAccounts, s.viewMode, s.assignedToMeOnly);
   },
 
   setSearchQuery: (query: string) => {
     set({ searchQuery: query });
+  },
+
+  setViewMode: (mode: ViewMode) => {
+    const s = get();
+    set({ viewMode: mode });
+    persist(s.selectedProjects, s.selectedTypes, s.mutedIssues, s.selectedAccounts, mode, s.assignedToMeOnly);
+  },
+
+  toggleAssignedToMe: () => {
+    const s = get();
+    const next = !s.assignedToMeOnly;
+    set({ assignedToMeOnly: next });
+    persist(s.selectedProjects, s.selectedTypes, s.mutedIssues, s.selectedAccounts, s.viewMode, next);
   },
 
   clearAll: () => {
@@ -164,7 +199,9 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       mutedIssues: new Set(),
       selectedAccounts: new Set(),
       searchQuery: "",
+      assignedToMeOnly: false,
+      // viewMode intentionally preserved — it's a persistent preference, not a transient filter
     });
-    persist(empty, emptyTypes, new Set(), new Set());
+    persist(empty, emptyTypes, new Set(), new Set(), get().viewMode, false);
   },
 }));

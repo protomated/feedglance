@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { ActivityItem } from "../types/activity";
 import { useFilterStore } from "../stores/filters";
 import { useNotificationStore } from "../stores/notifications";
+import { useAuthStore } from "../stores/auth";
 import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
 import { AssignDropdown } from "./AssignDropdown";
@@ -22,50 +23,365 @@ function relativeTime(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
-/** Describe what happened in this activity. */
-function describeActivity(activity: ActivityItem): string {
-  const categoryId = activity.category?.id;
-  const fieldName = activity.field?.name;
+const VALUE_TRUNCATE = 40;
 
-  switch (categoryId) {
-    case "CommentsCategory":
-      return "commented";
-    case "CustomFieldCategory":
-      if (fieldName) {
-        const added = extractName(activity.added);
-        if (added) return `changed ${fieldName} to ${added}`;
-        return `updated ${fieldName}`;
-      }
-      return "updated a field";
-    case "AttachmentsCategory":
-      return "added an attachment";
-    case "IssueCreatedCategory":
-      return "created this issue";
-    case "IssueResolvedCategory":
-      return "resolved this issue";
-    case "SprintCategory":
-      return "updated sprint";
-    case "VcsChangeCategory":
-      return "linked a commit";
-    default:
-      return "made a change";
-  }
+/** Truncate long values with ellipsis; full value is kept on the title attribute. */
+function truncate(s: string): string {
+  if (s.length <= VALUE_TRUNCATE) return s;
+  return s.slice(0, VALUE_TRUNCATE) + "…";
 }
 
-/** Extract a human-readable name from the `added` or `removed` value. */
-function extractName(value: unknown): string | null {
-  if (value == null) return null;
-  if (typeof value === "string") return value;
-  if (Array.isArray(value) && value.length > 0) {
-    const first = value[0];
-    if (typeof first === "object" && first !== null && "name" in first) {
-      return (first as { name: string }).name;
-    }
-  }
-  if (typeof value === "object" && value !== null && "name" in value) {
-    return (value as { name: string }).name;
+/** Normalize added/removed into an array of entries. */
+function toEntries(value: unknown): unknown[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value;
+  return [value];
+}
+
+/** Pick the first non-empty string among the given keys on an object. */
+function pickString(obj: Record<string, unknown>, keys: readonly string[]): string | null {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.length > 0) return v;
   }
   return null;
+}
+
+/** Keys we'll treat as a displayable label on an `added`/`removed` entry. */
+const LABEL_KEYS = ["name", "localizedName", "fullName", "presentation", "text", "login"] as const;
+
+/** Extract the first entry's displayable label, if any. */
+function extractName(value: unknown): string | null {
+  for (const entry of toEntries(value)) {
+    if (typeof entry === "string") return entry;
+    if (typeof entry === "object" && entry !== null) {
+      const n = pickString(entry as Record<string, unknown>, LABEL_KEYS);
+      if (n) return n;
+    }
+  }
+  return null;
+}
+
+/** Return all entries' displayable labels (for multi-enum / tag fields). */
+function extractAllNames(value: unknown): string[] {
+  const out: string[] = [];
+  for (const entry of toEntries(value)) {
+    if (typeof entry === "string") {
+      out.push(entry);
+    } else if (typeof entry === "object" && entry !== null) {
+      const n = pickString(entry as Record<string, unknown>, LABEL_KEYS);
+      if (n) out.push(n);
+    }
+  }
+  return out;
+}
+
+/** Return the first object's `login`, if present (for user references). */
+function extractLogin(value: unknown): string | null {
+  for (const entry of toEntries(value)) {
+    if (typeof entry === "object" && entry !== null && "login" in entry) {
+      const l = (entry as { login: unknown }).login;
+      if (typeof l === "string" && l.length > 0) return l;
+    }
+  }
+  return null;
+}
+
+/** Return the first object's `id`, if present (for user references). */
+function extractId(value: unknown): string | null {
+  for (const entry of toEntries(value)) {
+    if (typeof entry === "object" && entry !== null && "id" in entry) {
+      const i = (entry as { id: unknown }).id;
+      if (typeof i === "string" && i.length > 0) return i;
+    }
+  }
+  return null;
+}
+
+/** Return the first object's `presentation` (pre-formatted period values like "2h 30m"). */
+function extractPresentation(value: unknown): string | null {
+  for (const entry of toEntries(value)) {
+    if (typeof entry === "object" && entry !== null && "presentation" in entry) {
+      const p = (entry as { presentation: unknown }).presentation;
+      if (typeof p === "string" && p.length > 0) return p;
+    }
+  }
+  return null;
+}
+
+/** Return a numeric value (for date fields stored as unix-ms). */
+function extractNumber(value: unknown): number | null {
+  if (typeof value === "number") return value;
+  for (const entry of toEntries(value)) {
+    if (typeof entry === "number") return entry;
+    if (typeof entry === "object" && entry !== null) {
+      for (const key of ["value", "timestamp", "millis"]) {
+        if (key in entry) {
+          const v = (entry as Record<string, unknown>)[key];
+          if (typeof v === "number") return v;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+const DATE_FIELD_NAMES = new Set(["Due Date", "Due date", "Start date", "End date"]);
+const FREE_TEXT_FIELDS = new Set(["description", "summary"]);
+
+/** Format a unix-ms timestamp as "Apr 20" or "Apr 20, 2027" when year differs. */
+function formatDate(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+/** Relative suffix like "in 5 days" / "3 days ago" / "today". */
+function relativeDayTail(ms: number): string {
+  const now = Date.now();
+  const diffMs = ms - now;
+  const days = Math.round(diffMs / (1000 * 60 * 60 * 24));
+  if (days === 0) return "today";
+  if (days === 1) return "tomorrow";
+  if (days === -1) return "yesterday";
+  if (days > 0) return `in ${days} days`;
+  return `${-days} days ago`;
+}
+
+/** Presentation styles shared by the structured description renderer. */
+const cls = {
+  label: "text-gray-500 dark:text-gray-400",
+  arrow: "text-gray-400 dark:text-gray-500 mx-1",
+  oldValue: "line-through text-gray-400 dark:text-gray-500",
+  newValue: "text-gray-900 dark:text-gray-100",
+};
+
+interface DescriptionResult {
+  node: ReactNode;
+  isAssignmentToMe: boolean;
+  isUnassigned: boolean;
+}
+
+/** Render a truncated value span with full-text tooltip on hover. */
+function val(raw: string, strike = false): ReactNode {
+  const display = truncate(raw);
+  const className = strike ? cls.oldValue : cls.newValue;
+  return (
+    <span className={className} title={display === raw ? undefined : raw}>
+      {display}
+    </span>
+  );
+}
+
+/** Render "Old → New" or just "New" or "cleared". */
+function oldNew(oldName: string | null, newName: string | null, clearedLabel: string): ReactNode {
+  if (newName && oldName) {
+    return (
+      <>
+        {val(oldName, true)}
+        <span className={cls.arrow}>→</span>
+        {val(newName)}
+      </>
+    );
+  }
+  if (newName) return val(newName);
+  return <span className={cls.label}>{clearedLabel}</span>;
+}
+
+/** Describe what happened in this activity as a React node plus flags. */
+function describeActivity(activity: ActivityItem, currentUserLogin: string | null, currentUserId: string | null): DescriptionResult {
+  const categoryId = activity.category?.id;
+  const fieldName = activity.field?.name ?? "";
+
+  if (categoryId === "CommentsCategory") {
+    return { node: "commented", isAssignmentToMe: false, isUnassigned: false };
+  }
+  if (categoryId === "AttachmentsCategory") {
+    return { node: "added an attachment", isAssignmentToMe: false, isUnassigned: false };
+  }
+  if (categoryId === "IssueCreatedCategory") {
+    return { node: "created this issue", isAssignmentToMe: false, isUnassigned: false };
+  }
+  if (categoryId === "IssueResolvedCategory") {
+    return { node: "resolved this issue", isAssignmentToMe: false, isUnassigned: false };
+  }
+  if (categoryId === "VcsChangeCategory") {
+    return { node: "linked a commit", isAssignmentToMe: false, isUnassigned: false };
+  }
+  if (categoryId === "SprintCategory") {
+    const added = extractName(activity.added);
+    const removed = extractName(activity.removed);
+    if (added && !removed) return { node: <>moved to sprint {val(added)}</>, isAssignmentToMe: false, isUnassigned: false };
+    if (removed && !added) return { node: <>removed from sprint {val(removed)}</>, isAssignmentToMe: false, isUnassigned: false };
+    return { node: "updated sprint", isAssignmentToMe: false, isUnassigned: false };
+  }
+  if (categoryId !== "CustomFieldCategory" || !fieldName) {
+    return { node: "made a change", isAssignmentToMe: false, isUnassigned: false };
+  }
+
+  const added = activity.added;
+  const removed = activity.removed;
+
+  // Assignee field — match by login (preferred) or id, whichever we have.
+  if (fieldName === "Assignee") {
+    const addedLogin = extractLogin(added);
+    const addedId = extractId(added);
+    const addedName = extractName(added);
+    const isMe = (!!currentUserLogin && addedLogin === currentUserLogin)
+      || (!!currentUserId && addedId === currentUserId);
+    if (addedName) {
+      return { node: <>assigned to {val(addedName)}</>, isAssignmentToMe: isMe, isUnassigned: false };
+    }
+    // Cleared assignment
+    return { node: <span className={cls.label}>unassigned</span>, isAssignmentToMe: false, isUnassigned: true };
+  }
+
+  // Date fields
+  if (DATE_FIELD_NAMES.has(fieldName)) {
+    const newMs = extractNumber(added);
+    const oldMs = extractNumber(removed);
+    const labelPrefix = fieldName === "Due Date" || fieldName === "Due date" ? "Due" : fieldName;
+    if (newMs != null) {
+      const newStr = formatDate(newMs);
+      const tail = relativeDayTail(newMs);
+      if (oldMs != null) {
+        return {
+          node: (
+            <>
+              <span className={cls.label}>{labelPrefix}</span>{" "}
+              {val(formatDate(oldMs), true)}
+              <span className={cls.arrow}>→</span>
+              {val(newStr)}
+              <span className={cls.label}> · {tail}</span>
+            </>
+          ),
+          isAssignmentToMe: false, isUnassigned: false,
+        };
+      }
+      return {
+        node: (
+          <>
+            <span className={cls.label}>{labelPrefix}</span> {val(newStr)}
+            <span className={cls.label}> · {tail}</span>
+          </>
+        ),
+        isAssignmentToMe: false, isUnassigned: false,
+      };
+    }
+    return { node: <span className={cls.label}>{labelPrefix.toLowerCase()} cleared</span>, isAssignmentToMe: false, isUnassigned: false };
+  }
+
+  // Period fields (Estimation, Spent time) — YouTrack returns { presentation: "2h 30m" }
+  const newPres = extractPresentation(added);
+  const oldPres = extractPresentation(removed);
+  if (newPres || oldPres) {
+    return {
+      node: (
+        <>
+          <span className={cls.label}>{fieldName}:</span>{" "}
+          {oldNew(oldPres, newPres, `${fieldName.toLowerCase()} cleared`)}
+        </>
+      ),
+      isAssignmentToMe: false, isUnassigned: false,
+    };
+  }
+
+  // Free-text fields — don't diff prose
+  if (FREE_TEXT_FIELDS.has(fieldName.toLowerCase())) {
+    return { node: `updated ${fieldName.toLowerCase()}`, isAssignmentToMe: false, isUnassigned: false };
+  }
+
+  // Multi-enum / tags: both added and removed may be multi-entry
+  const addedNames = extractAllNames(added);
+  const removedNames = extractAllNames(removed);
+  if (addedNames.length + removedNames.length > 1) {
+    const parts: ReactNode[] = [];
+    addedNames.forEach((n, i) => {
+      parts.push(<span key={`a${i}`}>+{val(n)}</span>);
+    });
+    removedNames.forEach((n, i) => {
+      parts.push(<span key={`r${i}`}>−{val(n, true)}</span>);
+    });
+    return {
+      node: (
+        <>
+          <span className={cls.label}>{fieldName}:</span>{" "}
+          {parts.map((p, i) => (
+            <span key={i}>
+              {i > 0 && <span className={cls.label}>, </span>}
+              {p}
+            </span>
+          ))}
+        </>
+      ),
+      isAssignmentToMe: false, isUnassigned: false,
+    };
+  }
+
+  // Single-value fallback (State, Priority, Type, single-enum, plain text values)
+  const newName = addedNames[0] ?? null;
+  const oldName = removedNames[0] ?? null;
+  return {
+    node: (
+      <>
+        <span className={cls.label}>{fieldName}:</span>{" "}
+        {oldNew(oldName, newName, `${fieldName.toLowerCase()} cleared`)}
+      </>
+    ),
+    isAssignmentToMe: false, isUnassigned: false,
+  };
+}
+
+const VIDEO_EXTS = new Set(["mp4", "mov", "webm", "m4v", "avi", "mkv", "ogv"]);
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic", "avif"]);
+
+/** Match YouTrack markdown attachment refs: ![alt](filename.ext) */
+const ATTACHMENT_RE = /!\[[^\]]*\]\(([^)\s]+)\)/g;
+
+function classifyAttachment(filename: string): "video" | "image" | "file" {
+  const dot = filename.lastIndexOf(".");
+  if (dot < 0) return "file";
+  const ext = filename.slice(dot + 1).toLowerCase();
+  if (VIDEO_EXTS.has(ext)) return "video";
+  if (IMAGE_EXTS.has(ext)) return "image";
+  return "file";
+}
+
+/** Render comment text with ![](file.ext) refs replaced by compact chips. */
+function renderCommentBody(text: string): ReactNode {
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  const re = new RegExp(ATTACHMENT_RE.source, "g");
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const filename = match[1];
+    const kind = classifyAttachment(filename);
+    const icon = kind === "video" ? "🎬" : kind === "image" ? "🖼" : "📎";
+    parts.push(
+      <span
+        key={`att-${key++}`}
+        className="inline-flex items-center gap-1 px-1.5 py-[1px] mx-[1px] rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 text-[10px] align-middle"
+        title={filename}
+      >
+        <span aria-hidden>{icon}</span>
+        <span className="truncate max-w-[160px]">{truncate(filename)}</span>
+      </span>
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+  return parts.length === 1 && typeof parts[0] === "string" ? parts[0] : <>{parts}</>;
 }
 
 /** Extract comment text from the added value. */
@@ -173,9 +489,17 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
     return () => window.removeEventListener("kb-action", handler);
   }, [activity.id]);
 
+  const accounts = useAuthStore((s) => s.accounts);
   const authorName = activity.author?.name || activity.author?.login || "Unknown";
   const avatarUrl = activity.author?.avatarUrl;
-  const description = describeActivity(activity);
+  // Resolve the current-user identity for the account this activity belongs to
+  // (we have multiple accounts, each with its own user).
+  const activityAccount = activity.accountId
+    ? accounts.find((a) => a.id === activity.accountId)
+    : accounts[0];
+  const currentUserLogin = activityAccount?.user?.login ?? null;
+  const currentUserId = activityAccount?.user?.id ?? null;
+  const { node: description, isAssignmentToMe } = describeActivity(activity, currentUserLogin, currentUserId);
   const commentText = extractCommentText(activity);
   const time = relativeTime(activity.timestamp);
   const resolved = targetLabel(activity);
@@ -197,14 +521,17 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
   return (
     <div data-activity-id={activity.id}>
       <div
-        className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors ${
+        className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors cursor-pointer ${
+          isAssignmentToMe && !isRead ? "border-l-2 border-amber-400 dark:border-amber-500 pl-[10px]" : ""
+        } ${
           isRead
-            ? "opacity-60"
-            : "bg-blue-50/50 dark:bg-blue-900/10 cursor-pointer"
+            ? "opacity-60 hover:opacity-80 hover:bg-gray-50 dark:hover:bg-gray-800/50"
+            : isAssignmentToMe
+              ? "bg-amber-50/60 dark:bg-amber-900/10"
+              : "bg-blue-50/50 dark:bg-blue-900/10"
         }${isFocused ? " ring-2 ring-inset ring-blue-400 dark:ring-blue-500" : ""}`}
-        onClick={() => {
-          if (!isRead) onMarkRead(activity.id);
-        }}
+        title={isRead ? "Click to mark unread" : "Click to mark read"}
+        onClick={() => onMarkRead(activity.id)}
       >
         {/* Avatar */}
         <div className="flex-shrink-0 mt-0.5">
@@ -240,6 +567,11 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
               {authorName}
             </span>{" "}
             {description}
+            {isAssignmentToMe && (
+              <span className="ml-1.5 inline-flex items-center rounded px-1 py-[1px] text-[9px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200 align-middle">
+                Assigned to you
+              </span>
+            )}
           </p>
           {commentText && (
             <div className="mt-0.5">
@@ -248,7 +580,7 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
                   commentExpanded ? "" : "line-clamp-2"
                 }`}
               >
-                {commentText}
+                {renderCommentBody(commentText)}
               </p>
               {isLikelyMultiLine(commentText) && (
                 <button

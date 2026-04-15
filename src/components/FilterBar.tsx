@@ -46,11 +46,14 @@ export function FilterBar() {
   const selectedTypes = useFilterStore((s) => s.selectedTypes);
   const selectedAccounts = useFilterStore((s) => s.selectedAccounts);
   const searchQuery = useFilterStore((s) => s.searchQuery);
+  const assignedToMeOnly = useFilterStore((s) => s.assignedToMeOnly);
   const toggleProject = useFilterStore((s) => s.toggleProject);
   const toggleType = useFilterStore((s) => s.toggleType);
   const toggleAccount = useFilterStore((s) => s.toggleAccount);
   const setSearchQuery = useFilterStore((s) => s.setSearchQuery);
+  const toggleAssignedToMe = useFilterStore((s) => s.toggleAssignedToMe);
   const clearAll = useFilterStore((s) => s.clearAll);
+  const hasAnyUser = useAuthStore((s) => s.accounts.some((a) => !!a.user?.login || !!a.user?.id));
 
   const [apiProjects, setApiProjects] = useState<ProjectEntry[]>([]);
 
@@ -104,7 +107,8 @@ export function FilterBar() {
     selectedProjects.size > 0 ||
     selectedTypes.size > 0 ||
     selectedAccounts.size > 0 ||
-    searchQuery.length > 0;
+    searchQuery.length > 0 ||
+    assignedToMeOnly;
 
   return (
     <div className="border-b border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-800/50">
@@ -118,6 +122,26 @@ export function FilterBar() {
           className="w-full text-xs px-2 py-1 rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-400 dark:focus:border-blue-500"
         />
       </div>
+
+      {/* Assigned to me chip */}
+      {hasAnyUser && (
+        <div className="px-3 pb-1.5">
+          <button
+            onClick={toggleAssignedToMe}
+            className={`text-[10px] px-2 py-0.5 rounded-full transition-colors inline-flex items-center gap-1 ${
+              assignedToMeOnly
+                ? "bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-200 border border-amber-300 dark:border-amber-700"
+                : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-transparent hover:bg-gray-200 dark:hover:bg-gray-600"
+            }`}
+            title={assignedToMeOnly ? "Showing only issues assigned to you" : "Show only issues assigned to you"}
+          >
+            <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M10.561 8.073a6.005 6.005 0 0 1 3.432 5.142.75.75 0 1 1-1.498.07 4.5 4.5 0 0 0-8.99 0 .75.75 0 0 1-1.498-.07 6.004 6.004 0 0 1 3.431-5.142 3.999 3.999 0 1 1 5.123 0ZM10.5 5a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z" />
+            </svg>
+            Assigned to me
+          </button>
+        </div>
+      )}
 
       {/* Account chips (only when 2+ accounts) */}
       {accounts.length > 1 && (
