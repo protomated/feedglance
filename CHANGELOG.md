@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.3...youtrackd-v0.5.0) (2026-04-15)
+
+
+### Features
+
+* unread-by-default feed, rich field-change descriptions, assignee-to-me highlighting ([e9f178d](https://github.com/protomated/youtrackd/commit/e9f178d958a8ccf5c33dcbb2c66b24a6d97a7480))
+
 ## [0.4.3](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.2...youtrackd-v0.4.3) (2026-04-11)
 
 
