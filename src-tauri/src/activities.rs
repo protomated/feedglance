@@ -114,6 +114,10 @@ pub const POLL_CATEGORIES: &[&str] = &[
 ];
 
 /// Fields requested from the activities endpoint.
+///
+/// `added` and `removed` need an explicit sub-projection — without it, YouTrack
+/// returns minimal payloads (often just `$type`/`id`), stripping `name`/`login`
+/// and breaking our description rendering for state/priority/assignee changes.
 pub const ACTIVITY_FIELDS: &str = concat!(
     "id,",
     "author(id,login,name,avatarUrl),",
@@ -124,8 +128,8 @@ pub const ACTIVITY_FIELDS: &str = concat!(
     "issue(id,idReadable,summary,project(id,name,shortName)),",
     "article(id,idReadable,summary,project(id,name,shortName))),",
     "targetMember,",
-    "added,",
-    "removed,",
+    "added(id,name,localizedName,login,fullName,text,presentation,minutes,$type),",
+    "removed(id,name,localizedName,login,fullName,text,presentation,minutes,$type),",
     "field(name),",
     "$type"
 );

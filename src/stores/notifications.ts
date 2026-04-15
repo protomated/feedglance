@@ -81,6 +81,8 @@ interface NotificationState {
   setFocusState: (focus: "focused" | "minimized" | "idle") => Promise<void>;
   /** Mark a single activity as read (requires accountId). */
   markRead: (activityId: string, accountId?: string) => Promise<void>;
+  /** Mark a single activity as unread (reverses markRead). */
+  markUnread: (activityId: string, accountId?: string) => Promise<void>;
   /** Mark all activities as read. */
   markAllRead: () => Promise<void>;
   /** Refresh activities from backend cache. */
@@ -210,6 +212,33 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     const accountIds = readIdsMap.get(resolvedAccountId) ?? new Set();
     const newIds = new Set(accountIds);
     newIds.add(activityId);
+    readIdsMap.set(resolvedAccountId, newIds);
+    set({ readIds: readIdsMap });
+    persistReadIds(resolvedAccountId, newIds);
+  },
+
+  markUnread: async (activityId: string, accountId?: string) => {
+    const resolvedAccountId = accountId || get().activities.find((a) => a.id === activityId)?.accountId;
+    if (!resolvedAccountId) {
+      // Fallback: remove from all accounts
+      const readIdsMap = new Map(get().readIds);
+      for (const [acctId, ids] of readIdsMap) {
+        if (!ids.has(activityId)) continue;
+        const newIds = new Set(ids);
+        newIds.delete(activityId);
+        readIdsMap.set(acctId, newIds);
+        await invoke("mark_activity_unread", { activityId, accountId: acctId });
+        persistReadIds(acctId, newIds);
+      }
+      set({ readIds: readIdsMap });
+      return;
+    }
+
+    await invoke("mark_activity_unread", { activityId, accountId: resolvedAccountId });
+    const readIdsMap = new Map(get().readIds);
+    const accountIds = readIdsMap.get(resolvedAccountId) ?? new Set();
+    const newIds = new Set(accountIds);
+    newIds.delete(activityId);
     readIdsMap.set(resolvedAccountId, newIds);
     set({ readIds: readIdsMap });
     persistReadIds(resolvedAccountId, newIds);

@@ -200,6 +200,9 @@ pub fn start_polling_loop(
 
                         let mut new_count = 0u32;
                         let mut non_muted_new_count = 0u32;
+                        // Collect activities where the current user was just assigned,
+                        // so we can fire targeted notifications after releasing the lock.
+                        let mut assigned_to_me: Vec<(String, Option<String>)> = Vec::new();
 
                         for mut activity in new_activities {
                             // Stamp the account ID
@@ -228,6 +231,22 @@ pub fn start_polling_loop(
                             let is_muted = resolve_issue_id_readable(&activity)
                                 .map(|id| muted_issues.contains(&id))
                                 .unwrap_or(false);
+
+                            // Capture assignee-to-me targets (skip muted issues)
+                            if !is_muted
+                                && !current_user_id.is_empty()
+                                && is_assignment_to_user(&activity, current_user_id)
+                            {
+                                if let Some(issue_id) = resolve_issue_id_readable(&activity) {
+                                    let summary = activity
+                                        .target
+                                        .as_ref()
+                                        .and_then(|t| t.summary.clone().or_else(|| {
+                                            t.issue.as_ref().and_then(|i| i.summary.clone())
+                                        }));
+                                    assigned_to_me.push((issue_id, summary));
+                                }
+                            }
 
                             acct.seen_ids.insert(activity.id.clone());
                             acct.activities.insert(0, activity);
@@ -263,7 +282,18 @@ pub fn start_polling_loop(
 
                         // Send OS notification only for non-muted new activities
                         if non_muted_new_count > 0 && !is_initial_load {
-                            send_os_notification(&app_handle, non_muted_new_count);
+                            send_activity_batch_notification(&app_handle, non_muted_new_count);
+                        }
+
+                        // Fire a separate, targeted notification for each assignee-to-me event.
+                        if !is_initial_load {
+                            for (issue_id, summary) in assigned_to_me {
+                                let body = match summary {
+                                    Some(s) if !s.is_empty() => format!("{} — {}", issue_id, s),
+                                    _ => issue_id,
+                                };
+                                send_titled_notification(&app_handle, "Assigned to you", &body);
+                            }
                         }
                     }
                     Err(e) => {
@@ -319,9 +349,19 @@ fn resolve_issue_id_readable(activity: &ActivityItem) -> Option<String> {
     None
 }
 
-fn send_os_notification(app_handle: &AppHandle, count: u32) {
+/// Fire an OS notification with an explicit title + body.
+fn send_titled_notification(app_handle: &AppHandle, title: &str, body: &str) {
     use tauri_plugin_notification::NotificationExt;
+    let _ = app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
+}
 
+/// Batched "N new activities" notification.
+fn send_activity_batch_notification(app_handle: &AppHandle, count: u32) {
     let body = if count > 3 {
         format!("{} new activities in YouTrack", count)
     } else {
@@ -331,11 +371,34 @@ fn send_os_notification(app_handle: &AppHandle, count: u32) {
             if count == 1 { "y" } else { "ies" }
         )
     };
+    send_titled_notification(app_handle, "YouTrackd", &body);
+}
 
-    let _ = app_handle
-        .notification()
-        .builder()
-        .title("YouTrackd")
-        .body(&body)
-        .show();
+/// Returns true if this activity is a CustomField/Assignee change where the
+/// `added` array contains the given user (matched by `id`).
+fn is_assignment_to_user(activity: &ActivityItem, current_user_id: &str) -> bool {
+    if current_user_id.is_empty() {
+        return false;
+    }
+    let Some(ref category) = activity.category else { return false };
+    if category.id != "CustomFieldCategory" {
+        return false;
+    }
+    let Some(ref field) = activity.field else { return false };
+    if field.name.as_deref() != Some("Assignee") {
+        return false;
+    }
+    // `added` may be an array of user objects or a single object.
+    fn entry_matches(entry: &serde_json::Value, user_id: &str) -> bool {
+        entry
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| id == user_id)
+            .unwrap_or(false)
+    }
+    match &activity.added {
+        serde_json::Value::Array(arr) => arr.iter().any(|e| entry_matches(e, current_user_id)),
+        v @ serde_json::Value::Object(_) => entry_matches(v, current_user_id),
+        _ => false,
+    }
 }
