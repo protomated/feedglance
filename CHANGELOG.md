@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.5.0...youtrackd-v0.5.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* add fade-out animation when marking notifications as read ([cbfa4d9](https://github.com/protomated/youtrackd/commit/cbfa4d99c624d14285c16fb9f2719015ced045e7))
+
 ## [0.5.0](https://github.com/protomated/youtrackd/compare/youtrackd-v0.4.3...youtrackd-v0.5.0) (2026-04-15)
 
 
