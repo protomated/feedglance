@@ -351,6 +351,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
               key={group.projectKey}
               group={group}
               readIds={readIds}
+              justReadIds={justReadIds}
               pinnedIds={pinnedIds}
               focusedActivityId={focusedActivityId}
               onMarkRead={handleToggleRead}

@@ -463,13 +463,14 @@ function isLikelyMultiLine(text: string): boolean {
 interface Props {
   activity: ActivityItem;
   isRead: boolean;
+  isJustRead?: boolean;
   isPinned?: boolean;
   isFocused?: boolean;
   onMarkRead: (id: string) => void;
   onOpenInBrowser?: (targetId: string, targetType?: string, accountId?: string) => void;
 }
 
-export function NotificationItem({ activity, isRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
+export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
   const [commentExpanded, setCommentExpanded] = useState(false);
   const muteIssue = useFilterStore((s) => s.muteIssue);
@@ -519,7 +520,7 @@ export function NotificationItem({ activity, isRead, isPinned, isFocused, onMark
   };
 
   return (
-    <div data-activity-id={activity.id}>
+    <div data-activity-id={activity.id} className={isJustRead ? "animate-fade-out-read" : ""}>
       <div
         className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors cursor-pointer ${
           isAssignmentToMe && !isRead ? "border-l-2 border-amber-400 dark:border-amber-500 pl-[10px]" : ""
