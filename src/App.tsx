@@ -45,6 +45,21 @@ function resolveIssueIdForFilter(activity: ActivityItem): string | null {
   return t.issue?.idReadable ?? null;
 }
 
+/** Best-effort: detect if an activity is an Assignee change whose `added` names a given user. */
+function isAssigneeChangeTo(activity: ActivityItem, userLogin: string | null, userId: string | null): boolean {
+  if (activity.category?.id !== "CustomFieldCategory") return false;
+  if (activity.field?.name !== "Assignee") return false;
+  const added = activity.added;
+  const entries = Array.isArray(added) ? added : added != null ? [added] : [];
+  for (const entry of entries) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const obj = entry as Record<string, unknown>;
+    if (userLogin && obj.login === userLogin) return true;
+    if (userId && obj.id === userId) return true;
+  }
+  return false;
+}
+
 /** Check if an activity matches the search query. */
 function matchesSearch(activity: ActivityItem, query: string): boolean {
   const q = query.toLowerCase();
@@ -92,6 +107,8 @@ function App() {
   const mutedIssues = useFilterStore((s) => s.mutedIssues);
   const searchQuery = useFilterStore((s) => s.searchQuery);
   const selectedAccounts = useFilterStore((s) => s.selectedAccounts);
+  const assignedToMeOnly = useFilterStore((s) => s.assignedToMeOnly);
+  const currentUserId = useAuthStore((s) => s.user?.id);
 
   const [globalShortcut, setGlobalShortcut] = useState(DEFAULT_SHORTCUT);
   const pollingStartedRef = useRef(false);
@@ -101,10 +118,19 @@ function App() {
   // recomputes whenever the store's read IDs change (e.g. after markRead).
   const readIds = useMemo(() => allReadIds(), [readIdsMap]);
 
-  // Compute the flat (filtered) activity list for keyboard navigation
+  const accountUsers = useMemo(() => {
+    const map = new Map<string, { login: string | null; id: string | null }>();
+    for (const a of accounts) {
+      map.set(a.id, { login: a.user?.login ?? null, id: a.user?.id ?? null });
+    }
+    return map;
+  }, [accounts]);
+
+  // Must mirror NotificationFeed's filters exactly so the header/tray badge
+  // matches what the feed actually shows.
   const flatActivities = useMemo(() => {
     return activities.filter((a) => {
-      // Account filter
+      if (currentUserId && a.author?.id === currentUserId) return false;
       if (selectedAccounts.size > 0 && a.accountId) {
         if (!selectedAccounts.has(a.accountId)) return false;
       }
@@ -123,9 +149,15 @@ function App() {
       if (searchQuery.length > 0) {
         if (!matchesSearch(a, searchQuery)) return false;
       }
+      if (assignedToMeOnly) {
+        const u = a.accountId ? accountUsers.get(a.accountId) : null;
+        const login = u?.login ?? null;
+        const id = u?.id ?? null;
+        if (!isAssigneeChangeTo(a, login, id)) return false;
+      }
       return true;
     });
-  }, [activities, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery]);
+  }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers]);
 
   // Unread count derived from filtered activities so badge matches the feed
   const unreadCount = countUnread(flatActivities, readIds);
