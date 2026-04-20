@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/protomated/youtrackd/compare/youtrackd-v0.5.1...youtrackd-v0.5.2) (2026-04-20)
+
+
+### Bug Fixes
+
+* only show comment "Show more" when text actually overflows ([6659fcb](https://github.com/protomated/youtrackd/commit/6659fcb14bf9ce3244248e23dc1adba3a1097172))
+
 ## [0.5.1](https://github.com/protomated/youtrackd/compare/youtrackd-v0.5.0...youtrackd-v0.5.1) (2026-04-16)
 
 
