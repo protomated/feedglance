@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ActivityItem } from "../types/activity";
 import { useFilterStore } from "../stores/filters";
 import { useNotificationStore } from "../stores/notifications";
@@ -455,10 +455,6 @@ function resolveProjectId(activity: ActivityItem): string | null {
 
 type ActiveAction = "reply" | "status" | "assign" | null;
 
-/** Check if text is likely longer than what 2 lines would show (~120 chars). */
-function isLikelyMultiLine(text: string): boolean {
-  return text.length > 120 || text.includes("\n");
-}
 
 interface Props {
   activity: ActivityItem;
@@ -473,6 +469,8 @@ interface Props {
 export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
   const [commentExpanded, setCommentExpanded] = useState(false);
+  const [commentOverflows, setCommentOverflows] = useState(false);
+  const commentRef = useRef<HTMLParagraphElement>(null);
   const muteIssue = useFilterStore((s) => s.muteIssue);
   const pinActivity = useNotificationStore((s) => s.pinActivity);
   const unpinActivity = useNotificationStore((s) => s.unpinActivity);
@@ -502,6 +500,14 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   const currentUserId = activityAccount?.user?.id ?? null;
   const { node: description, isAssignmentToMe } = describeActivity(activity, currentUserLogin, currentUserId);
   const commentText = extractCommentText(activity);
+
+  useLayoutEffect(() => {
+    if (!commentText || commentExpanded) return;
+    const el = commentRef.current;
+    if (!el) return;
+    setCommentOverflows(el.scrollHeight > el.clientHeight + 1);
+  }, [commentText, commentExpanded]);
+
   const time = relativeTime(activity.timestamp);
   const resolved = targetLabel(activity);
 
@@ -577,13 +583,14 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
           {commentText && (
             <div className="mt-0.5">
               <p
+                ref={commentRef}
                 className={`text-gray-500 dark:text-gray-400 leading-snug whitespace-pre-wrap ${
                   commentExpanded ? "" : "line-clamp-2"
                 }`}
               >
                 {renderCommentBody(commentText)}
               </p>
-              {isLikelyMultiLine(commentText) && (
+              {(commentOverflows || commentExpanded) && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
