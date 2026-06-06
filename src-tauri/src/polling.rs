@@ -264,10 +264,10 @@ pub fn start_polling_loop(
                             }
                         }
 
-                        // Prune read_ids
-                        if acct.read_ids.len() > 5000 {
-                            acct.read_ids.clear();
-                        }
+                        // Read IDs are age-pruned (30-day TTL) durably on the
+                        // frontend, which is the source of truth across restarts.
+                        // The backend set is rehydrated from there, so no
+                        // in-memory pruning is needed here.
 
                         drop(mgr);
 
