@@ -217,6 +217,52 @@ async fn set_read_ids(
     Ok(())
 }
 
+/// Restore a disk-cached set of activities into an account's in-memory state.
+///
+/// Called once on startup (before polling begins) so unread items survive a
+/// restart instead of being limited to the 24h re-fetch window. Seeds the
+/// activity list, the dedup `seen_ids` set, and the polling `watermark` so the
+/// next poll resumes incrementally rather than re-scanning the last 24 hours.
+///
+/// If the account state does not exist yet (polling not started), a placeholder
+/// is created with empty credentials; `start_polling` later fills those in
+/// without clearing the restored activities.
+#[tauri::command]
+async fn restore_activities(
+    state: tauri::State<'_, SharedPollingState>,
+    activities: Vec<activities::ActivityItem>,
+    account_id: String,
+) -> Result<(), String> {
+    let mut mgr = state.write().await;
+    let acct = mgr
+        .accounts
+        .entry(account_id.clone())
+        .or_insert_with(|| AccountPollingState::new(String::new(), String::new(), String::new()));
+
+    // Only seed an empty cache — never clobber activities a live poll already fetched.
+    if !acct.activities.is_empty() {
+        return Ok(());
+    }
+
+    let mut max_ts = acct.watermark;
+    for mut activity in activities {
+        // Re-stamp the account ID (skipped during deserialization).
+        activity.account_id = account_id.clone();
+        if acct.seen_ids.contains(&activity.id) {
+            continue;
+        }
+        if activity.timestamp > max_ts {
+            max_ts = activity.timestamp;
+        }
+        acct.seen_ids.insert(activity.id.clone());
+        acct.activities.push(activity);
+    }
+    // Cached activities are stored newest-first; keep that ordering.
+    acct.activities.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    acct.watermark = max_ts;
+    Ok(())
+}
+
 #[tauri::command]
 async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result<u32, String> {
     let mgr = state.read().await;
@@ -366,6 +412,7 @@ pub fn run() {
             get_projects,
             set_tray_badge,
             set_read_ids,
+            restore_activities,
             execute_command,
             post_comment,
             get_project_states,

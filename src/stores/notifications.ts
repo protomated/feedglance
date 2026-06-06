@@ -12,7 +12,13 @@ import type {
 const READ_STORE_NAME = "read_ids.json";
 const KEY_PINNED_IDS = "pinned_ids";
 
+/** Separate store file for the cached activity feed (can grow large). */
+const ACTIVITIES_STORE_NAME = "activities.json";
+/** Cap on cached activities persisted per account (mirrors backend's 500). */
+const MAX_CACHED_ACTIVITIES = 500;
+
 let readStoreInstance: Awaited<ReturnType<typeof load>> | null = null;
+let activitiesStoreInstance: Awaited<ReturnType<typeof load>> | null = null;
 
 async function getReadStore() {
   if (!readStoreInstance) {
@@ -21,9 +27,102 @@ async function getReadStore() {
   return readStoreInstance;
 }
 
+async function getActivitiesStore() {
+  if (!activitiesStoreInstance) {
+    activitiesStoreInstance = await load(ACTIVITIES_STORE_NAME);
+  }
+  return activitiesStoreInstance;
+}
+
 /** Get the store key for per-account read IDs. */
 function readIdsKey(accountId: string): string {
   return accountId ? `read_ids:${accountId}` : "read_ids";
+}
+
+/** Get the store key for an account's cached activities. */
+function activitiesKey(accountId: string): string {
+  return `activities:${accountId}`;
+}
+
+/**
+ * Persist the current activity feed to disk, grouped per account, so unread
+ * items survive a restart (debounced — refresh() can fire on every poll).
+ */
+let activitiesPersistTimer: ReturnType<typeof setTimeout> | null = null;
+async function persistActivities(activities: ActivityItem[]) {
+  if (activitiesPersistTimer) clearTimeout(activitiesPersistTimer);
+  activitiesPersistTimer = setTimeout(async () => {
+    try {
+      const store = await getActivitiesStore();
+      // Group by account; trust input is already newest-first from the backend.
+      const byAccount = new Map<string, ActivityItem[]>();
+      for (const a of activities) {
+        const acctId = a.accountId || "";
+        const list = byAccount.get(acctId) ?? [];
+        if (list.length < MAX_CACHED_ACTIVITIES) list.push(a);
+        byAccount.set(acctId, list);
+      }
+      for (const [acctId, list] of byAccount) {
+        await store.set(activitiesKey(acctId), list);
+      }
+      await store.save();
+    } catch {
+      // Store may not be ready yet
+    }
+  }, 500);
+}
+
+/**
+ * Load cached activities for an account from disk and seed them back into the
+ * Rust backend so dedup, watermark, and unread counts are correct on restart.
+ */
+async function restoreActivitiesForAccount(accountId: string): Promise<void> {
+  try {
+    const store = await getActivitiesStore();
+    const cached = await store.get<ActivityItem[]>(activitiesKey(accountId));
+    if (cached && cached.length > 0) {
+      await invoke("restore_activities", { activities: cached, accountId });
+    }
+  } catch {
+    // No cache yet, or backend not ready
+  }
+}
+
+/** Read IDs older than this are pruned from disk on load (per spec: 30 days). */
+const READ_ID_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * On-disk shape for read IDs: a map of activity ID → epoch-ms when it was
+ * marked read. Stored instead of a flat array so we can prune by age. Older
+ * builds wrote a `string[]`; {@link loadReadIds} migrates that on read.
+ */
+type ReadIdMap = Record<string, number>;
+
+/**
+ * Load and age-prune an account's read IDs from disk.
+ *
+ * Accepts both the new `{ id: markedAtMs }` map and the legacy `string[]`
+ * format (legacy IDs are treated as "just now" so they aren't pruned on the
+ * first run after upgrade). Returns the surviving ID set plus the pruned-and-
+ * migrated map ready to write back.
+ */
+async function loadReadIds(
+  store: Awaited<ReturnType<typeof load>>,
+  key: string,
+  nowMs: number
+): Promise<{ ids: Set<string>; map: ReadIdMap }> {
+  const raw = await store.get<ReadIdMap | string[]>(key);
+  const map: ReadIdMap = {};
+  if (Array.isArray(raw)) {
+    // Legacy untimestamped format — stamp as "now" so nothing is lost on upgrade.
+    for (const id of raw) map[id] = nowMs;
+  } else if (raw && typeof raw === "object") {
+    const cutoff = nowMs - READ_ID_TTL_MS;
+    for (const [id, ts] of Object.entries(raw)) {
+      if (typeof ts === "number" && ts >= cutoff) map[id] = ts;
+    }
+  }
+  return { ids: new Set(Object.keys(map)), map };
 }
 
 /** Persist read IDs to disk for a specific account. */
@@ -33,7 +132,18 @@ async function persistReadIds(accountId: string, readIds: Set<string>) {
   persistTimers[accountId] = setTimeout(async () => {
     try {
       const store = await getReadStore();
-      await store.set(readIdsKey(accountId), Array.from(readIds));
+      const now = Date.now();
+      // Preserve existing mark-times; stamp newly-seen IDs with now. Drop IDs
+      // no longer in the set, and prune anything past the 30-day TTL.
+      const prev = await store.get<ReadIdMap | string[]>(readIdsKey(accountId));
+      const prevMap: ReadIdMap = Array.isArray(prev) ? {} : prev ?? {};
+      const cutoff = now - READ_ID_TTL_MS;
+      const next: ReadIdMap = {};
+      for (const id of readIds) {
+        const ts = typeof prevMap[id] === "number" ? prevMap[id] : now;
+        if (ts >= cutoff) next[id] = ts;
+      }
+      await store.set(readIdsKey(accountId), next);
       await store.save();
     } catch {
       // Store may not be ready yet
@@ -111,39 +221,51 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     // Load persisted read IDs per account and pinned IDs
     try {
       const store = await getReadStore();
+      const now = Date.now();
       const readIdsMap = new Map<string, Set<string>>();
 
       for (const account of accounts) {
         const key = readIdsKey(account.id);
-        const saved = await store.get<string[]>(key);
-        const idSet = new Set(saved ?? []);
-        readIdsMap.set(account.id, idSet);
-        syncReadIdsToBackend(account.id, idSet);
+        // Load + prune entries older than the 30-day TTL, then write the
+        // pruned/migrated map back so the prune is durable across restarts.
+        const { ids, map } = await loadReadIds(store, key, now);
+        await store.set(key, map);
+        readIdsMap.set(account.id, ids);
+        syncReadIdsToBackend(account.id, ids);
       }
 
       // Also try to load legacy flat read_ids and attribute to first account
       if (accounts.length > 0) {
-        const legacyReadIds = await store.get<string[]>("read_ids");
-        if (legacyReadIds && legacyReadIds.length > 0) {
+        const { ids: legacyIds } = await loadReadIds(store, "read_ids", now);
+        if (legacyIds.size > 0) {
           const firstId = accounts[0].id;
           const existing = readIdsMap.get(firstId) ?? new Set();
-          for (const id of legacyReadIds) {
+          for (const id of legacyIds) {
             existing.add(id);
           }
           readIdsMap.set(firstId, existing);
-          // Migrate: write to new key and remove old
-          await store.set(readIdsKey(firstId), Array.from(existing));
+          // Migrate: write to the new (timestamped) key and remove the old one.
+          const migrated: ReadIdMap = {};
+          for (const id of existing) migrated[id] = now;
+          await store.set(readIdsKey(firstId), migrated);
           await store.delete("read_ids");
-          await store.save();
           syncReadIdsToBackend(firstId, existing);
         }
       }
+
+      await store.save();
 
       const savedPinnedIds = await store.get<string[]>(KEY_PINNED_IDS);
       const pinnedIdSet = new Set(savedPinnedIds ?? []);
       set({ readIds: readIdsMap, pinnedIds: pinnedIdSet });
     } catch {
       // First run — no stored data
+    }
+
+    // Rehydrate the activity feed from disk into the backend BEFORE the first
+    // refresh, so unread items older than the 24h poll window survive restart.
+    for (const account of accounts) {
+      await restoreActivitiesForAccount(account.id);
     }
 
     // Listen for backend polling events (new payload shape: { accountId, count })
@@ -268,6 +390,8 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
         activities,
         error: null,
       });
+      // Persist the feed so it survives a restart (debounced internally).
+      persistActivities(activities);
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
     }
