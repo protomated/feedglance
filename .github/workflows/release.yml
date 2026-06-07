@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for the release (e.g. youtrackd-v0.2.1)'
-        required: true
+        description: 'Tag name for a manual release (e.g. youtrackd-v0.2.1). Leave blank to auto-bump from conventional commits.'
+        required: false
         type: string
 
 concurrency:
@@ -15,44 +15,125 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ── Step 1: release-please analyses commits and creates/updates a PR ──
-  # When a Release PR is merged, it creates a tag + GitHub release.
-  # Skipped on workflow_dispatch since we already have the tag.
-  release-please:
-    if: github.event_name == 'push'
+  # ── Step 1: Compute the next version from conventional commits and tag ──
+  # Replaces release-please: instead of opening a PR, we analyse commits since
+  # the last tag, bump semver (feat→minor, fix/perf→patch, BREAKING→major),
+  # sync version files, commit, and push a tag — all on the same push to main.
+  version:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      release_id: ${{ steps.release.outputs.id }}
+      release_created: ${{ steps.bump.outputs.release_created }}
+      tag_name: ${{ steps.bump.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
+      - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
+          fetch-tags: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Convert the release to a draft immediately so it's hidden
-      # until all platform builds finish and the user publishes it.
-      - name: Convert release to draft
-        if: steps.release.outputs.release_created == 'true'
+      - name: Compute next version and tag
+        id: bump
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MANUAL_TAG: ${{ inputs.tag_name }}
         run: |
-          gh api repos/${{ github.repository }}/releases/${{ steps.release.outputs.id }} \
-            --method PATCH -F draft=true
+          set -euo pipefail
+
+          TAG_PREFIX="youtrackd-v"
+
+          # ── Manual dispatch with an explicit tag: use it verbatim. ──
+          if [ -n "${MANUAL_TAG:-}" ]; then
+            NEW_TAG="$MANUAL_TAG"
+            NEW_VERSION="${NEW_TAG#"$TAG_PREFIX"}"
+            echo "Manual release requested: $NEW_TAG"
+          else
+            # ── Find the most recent version tag. ──
+            LAST_TAG="$(git tag --list "${TAG_PREFIX}*" --sort=-version:refname | head -n1)"
+            if [ -z "$LAST_TAG" ]; then
+              LAST_VERSION="0.0.0"
+              RANGE=""
+              echo "No existing tag found; starting from 0.0.0"
+            else
+              LAST_VERSION="${LAST_TAG#"$TAG_PREFIX"}"
+              RANGE="${LAST_TAG}..HEAD"
+              echo "Last tag: $LAST_TAG (version $LAST_VERSION)"
+            fi
+
+            # ── Inspect conventional commits since the last tag. ──
+            COMMITS="$(git log --format='%B' ${RANGE} 2>/dev/null || git log --format='%B')"
+
+            BUMP="none"
+            # Major: a "!" before the ":" in the type, or a BREAKING CHANGE footer.
+            if echo "$COMMITS" | grep -qE '^[a-zA-Z]+(\([^)]*\))?!:' \
+               || echo "$COMMITS" | grep -qE 'BREAKING[ -]CHANGE'; then
+              BUMP="major"
+            elif echo "$COMMITS" | grep -qE '^feat(\([^)]*\))?:'; then
+              BUMP="minor"
+            elif echo "$COMMITS" | grep -qE '^(fix|perf)(\([^)]*\))?:'; then
+              BUMP="patch"
+            fi
+
+            echo "Detected bump: $BUMP"
+            if [ "$BUMP" = "none" ]; then
+              echo "No release-worthy commits since ${LAST_TAG:-start}. Skipping release."
+              echo "release_created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            IFS='.' read -r MAJ MIN PAT <<< "$LAST_VERSION"
+            case "$BUMP" in
+              major) MAJ=$((MAJ + 1)); MIN=0; PAT=0 ;;
+              minor) MIN=$((MIN + 1)); PAT=0 ;;
+              patch) PAT=$((PAT + 1)) ;;
+            esac
+            NEW_VERSION="${MAJ}.${MIN}.${PAT}"
+            NEW_TAG="${TAG_PREFIX}${NEW_VERSION}"
+            echo "New version: $NEW_VERSION  ($NEW_TAG)"
+          fi
+
+          # ── Bail out if the tag already exists (e.g. re-run). ──
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "Tag $NEW_TAG already exists. Skipping release."
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ── Sync version into the three source-of-truth files. ──
+          # package.json
+          node -e "const f='package.json';const j=require('./'+f);j.version='$NEW_VERSION';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
+          # src-tauri/tauri.conf.json
+          node -e "const f='src-tauri/tauri.conf.json';const j=require('./'+f);j.version='$NEW_VERSION';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
+          # src-tauri/Cargo.toml — bump the [package] version (first version= line).
+          perl -0pi -e 's/^version = "\d+\.\d+\.\d+"/version = "'"$NEW_VERSION"'"/m' src-tauri/Cargo.toml
+          # Keep Cargo.lock's youtrackd entry in step so CI doesn't drift.
+          if command -v cargo >/dev/null 2>&1; then
+            (cd src-tauri && cargo update -p youtrackd --precise "$NEW_VERSION" 2>/dev/null) || true
+          fi
+
+          # ── Commit the version bump and push the tag. ──
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock 2>/dev/null || true
+          git commit -m "chore(release): ${NEW_VERSION} [skip ci]" || echo "Nothing to commit"
+          git tag "$NEW_TAG"
+          git push origin HEAD:main
+          git push origin "$NEW_TAG"
+
+          # ── Create a draft release; build job fills it, publish job flips it live. ──
+          gh release create "$NEW_TAG" \
+            --title "YouTrackd $NEW_TAG" \
+            --draft --prerelease \
+            --generate-notes
+
+          echo "release_created=true" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
   # ── Step 2: Build Tauri app for all platforms ─────────────────────────
-  # Runs when release-please creates a release OR on manual dispatch.
   build-tauri:
-    needs: release-please
-    if: |
-      always() && (
-        (needs.release-please.result == 'success' && needs.release-please.outputs.release_created == 'true') ||
-        (github.event_name == 'workflow_dispatch')
-      )
+    needs: version
+    if: needs.version.outputs.release_created == 'true'
     permissions:
       contents: write
     strategy:
@@ -75,6 +156,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag_name }}
 
       - name: Install dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
@@ -113,8 +196,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}
-          releaseName: 'YouTrackd ${{ needs.release-please.outputs.tag_name || inputs.tag_name }}'
+          tagName: ${{ needs.version.outputs.tag_name }}
+          releaseName: 'YouTrackd ${{ needs.version.outputs.tag_name }}'
           releaseBody: |
             See the assets below to download and install.
 
@@ -126,8 +209,8 @@ jobs:
 
   # ── Step 3: Publish the draft release once all builds succeed ────────
   publish-release:
-    needs: [release-please, build-tauri]
-    if: always() && needs.build-tauri.result == 'success'
+    needs: [version, build-tauri]
+    if: needs.build-tauri.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -136,7 +219,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ needs.release-please.outputs.tag_name || inputs.tag_name }}"
+          TAG="${{ needs.version.outputs.tag_name }}"
           echo "Publishing release for tag: $TAG"
           gh api repos/${{ github.repository }}/releases \
             --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1 | \
