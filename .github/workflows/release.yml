@@ -64,6 +64,13 @@ jobs:
             # ── Inspect conventional commits since the last tag. ──
             COMMITS="$(git log --format='%B' ${RANGE} 2>/dev/null || git log --format='%B')"
 
+            # ── Manual override: skip the release if any commit in range opts out. ──
+            if echo "$COMMITS" | grep -qiE '\[skip[ -](release|ci)\]'; then
+              echo "Found [skip release]/[skip ci] in commit range. Skipping release."
+              echo "release_created=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
             BUMP="none"
             # Major: a "!" before the ":" in the type, or a BREAKING CHANGE footer.
             if echo "$COMMITS" | grep -qE '^[a-zA-Z]+(\([^)]*\))?!:' \
