@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/protomated/youtrackd/compare/youtrackd-v0.5.2...youtrackd-v0.5.3) (2026-06-07)
+
+
+### Bug Fixes
+
+* persist notifications across restarts and prune read IDs by age ([024485e](https://github.com/protomated/youtrackd/commit/024485e051b6cadec495b8314abc3586e18d5d0e))
+
 ## [0.5.2](https://github.com/protomated/youtrackd/compare/youtrackd-v0.5.1...youtrackd-v0.5.2) (2026-04-20)
 
 
