@@ -59,6 +59,8 @@ interface AuthState {
   addAccount: (url: string, token: string, provider?: ProviderKind) => Promise<Account>;
   removeAccount: (accountId: string) => Promise<void>;
   updateToken: (accountId: string, newToken: string) => Promise<void>;
+  /** Set a user-chosen display name. An empty value restores the default. */
+  renameAccount: (accountId: string, label: string) => Promise<void>;
   checkHealth: (accountId?: string) => Promise<boolean>;
   /** @deprecated Use addAccount. Kept for Onboarding backward compat during transition. */
   connect: (url: string, token: string, provider?: ProviderKind) => Promise<UserInfo>;
@@ -259,6 +261,30 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       connectionStatus: deriveOverallStatus(newStatuses),
       credentials: first ? { url: first.url, token: first.token } : null,
       user: first?.user ?? null,
+    });
+  },
+
+  renameAccount: async (accountId: string, label: string) => {
+    const account = get().accounts.find((a) => a.id === accountId);
+    if (!account) throw new Error("Account not found");
+
+    const trimmed = label.trim();
+    const updated: Account = {
+      ...account,
+      // Clearing the name falls back to the derived default rather than
+      // leaving the row blank.
+      label:
+        trimmed ||
+        labelForAccount(
+          account.url,
+          account.provider,
+          account.user?.fullName || account.user?.login,
+        ),
+    };
+    await saveAccount(updated);
+
+    set({
+      accounts: get().accounts.map((a) => (a.id === accountId ? updated : a)),
     });
   },
 
