@@ -105,9 +105,15 @@ impl AccountPollingState {
                 &self.token,
                 &self.current_user_id,
             )),
-            ProviderKind::Nifty => {
-                Box::new(NiftyProvider::new(&self.token, &self.current_user_id))
-            }
+            // For Nifty, `url` is the workspace origin used for deep links
+            // (`{slug}.nifty.pm` or a CNAME custom domain), not an API host —
+            // the API lives at a fixed address. It is optional: without it,
+            // events simply carry no deep link.
+            ProviderKind::Nifty => Box::new(NiftyProvider::with_workspace(
+                &self.token,
+                &self.current_user_id,
+                &self.url,
+            )),
         }
     }
 

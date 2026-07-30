@@ -215,15 +215,39 @@ pub struct NiftyProvider {
     token: String,
     client: reqwest::Client,
     current_user_id: String,
+    /// Workspace origin for deep links, e.g. `https://acme.nifty.pm` or a CNAME
+    /// custom domain like `https://portal.example.com`.
+    ///
+    /// Not derivable from the API — it exposes neither the workspace slug nor
+    /// the custom domain — so it comes from account config. Empty means
+    /// "unknown", and events are emitted without a URL rather than a wrong one.
+    workspace_url: String,
 }
 
 impl NiftyProvider {
     pub fn new(token: &str, current_user_id: &str) -> Self {
+        Self::with_workspace(token, current_user_id, "")
+    }
+
+    pub fn with_workspace(token: &str, current_user_id: &str, workspace_url: &str) -> Self {
         Self {
             token: token.to_string(),
             client: reqwest::Client::new(),
             current_user_id: current_user_id.to_string(),
+            workspace_url: workspace_url.trim_end_matches('/').to_string(),
         }
+    }
+
+    /// Deep link for a task, when the workspace host is configured.
+    ///
+    /// The `/task/` segment is unverified: Nifty's SPA serves HTTP 200 for every
+    /// path, so the route cannot be confirmed from outside the app. Mirrors
+    /// `NIFTY_TASK_PATH` in `src/types/event.ts`; correct both together.
+    fn task_url(&self, task_id: &str) -> Option<String> {
+        if self.workspace_url.is_empty() || task_id.is_empty() {
+            return None;
+        }
+        Some(format!("{}/task/{}", self.workspace_url, task_id))
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {
@@ -364,6 +388,8 @@ impl NiftyProvider {
         // everything read and the feed goes permanently quiet.
         let seen_remotely = None;
 
+        let url = self.task_url(&subject.id);
+
         NormalizedEvent {
             id: format!("nifty:{}", msg.id),
             provider: ProviderKind::Nifty,
@@ -378,7 +404,7 @@ impl NiftyProvider {
             text: msg.text.clone(),
             mentions_me,
             seen_remotely,
-            url: None,
+            url,
             account_id: String::new(),
             raw: serde_json::to_value(msg).unwrap_or(serde_json::Value::Null),
         }
@@ -572,6 +598,40 @@ mod tests {
             labels: vec![],
             milestone: None,
         }
+    }
+
+    #[test]
+    fn task_url_uses_configured_workspace_host() {
+        let p = NiftyProvider::with_workspace("t", "u", "https://protomated.nifty.pm");
+        assert_eq!(
+            p.task_url("abc123").as_deref(),
+            Some("https://protomated.nifty.pm/task/abc123")
+        );
+    }
+
+    #[test]
+    fn task_url_supports_cname_custom_domain() {
+        let p = NiftyProvider::with_workspace("t", "u", "https://portal.protomated.com");
+        assert_eq!(
+            p.task_url("abc123").as_deref(),
+            Some("https://portal.protomated.com/task/abc123")
+        );
+    }
+
+    #[test]
+    fn task_url_tolerates_trailing_slash() {
+        let p = NiftyProvider::with_workspace("t", "u", "https://acme.nifty.pm/");
+        assert_eq!(
+            p.task_url("x").as_deref(),
+            Some("https://acme.nifty.pm/task/x")
+        );
+    }
+
+    /// Without a configured host there is no correct URL to build — emitting a
+    /// guessed one would deep-link users into a workspace they cannot open.
+    #[test]
+    fn task_url_is_none_without_workspace() {
+        assert!(NiftyProvider::new("t", "u").task_url("abc").is_none());
     }
 
     #[test]

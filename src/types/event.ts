@@ -88,20 +88,64 @@ export const EVENT_KIND_LABELS: Record<EventKind, string> = {
 };
 
 /**
+ * Path segment for a Nifty task, appended to the workspace host.
+ *
+ * Nifty's web app is a client-routed SPA that serves HTTP 200 for *every* path
+ * (a nonsense URL returns 200 just like a real one), so this route could not be
+ * verified from outside the app and is a best guess. If deep links land on the
+ * wrong screen, this constant is the single place to correct.
+ */
+const NIFTY_TASK_PATH = "task";
+
+/**
  * Resolve an event's deep link.
  *
  * Providers supply `url` where they can; this falls back for cached events
  * persisted before the field existed.
+ *
+ * `instanceUrl` is the account's configured workspace host. Nifty has no fixed
+ * public host: workspaces live at `{workspace}.nifty.pm`, and paid plans can
+ * front that with a CNAME custom domain (e.g. `portal.example.com`) serving the
+ * same app. The REST API exposes neither the workspace slug nor the custom
+ * domain, so the host must come from account config — there is nothing sensible
+ * to hardcode, and guessing would deep-link users to a workspace they cannot
+ * open.
  */
 export function eventUrl(event: NormalizedEvent, instanceUrl?: string): string | undefined {
   if (event.url) return event.url;
-  if (event.provider === "youtrack" && instanceUrl && event.subject.displayId) {
-    return `${instanceUrl.replace(/\/$/, "")}/issue/${event.subject.displayId}`;
+
+  const host = instanceUrl?.replace(/\/$/, "");
+  if (!host) return undefined;
+
+  if (event.provider === "youtrack" && event.subject.displayId) {
+    return `${host}/issue/${event.subject.displayId}`;
   }
   if (event.provider === "nifty" && event.subject.id) {
-    return `https://app.niftypm.com/task/${event.subject.id}`;
+    return `${host}/${NIFTY_TASK_PATH}/${event.subject.id}`;
   }
   return undefined;
+}
+
+/**
+ * Normalize a user-entered workspace host into an absolute origin.
+ *
+ * Accepts what people actually paste — `protomated.nifty.pm`,
+ * `https://portal.example.com/`, or a full task URL — and reduces it to a bare
+ * origin. Returns null when there is no usable host.
+ */
+export function normalizeWorkspaceHost(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  try {
+    const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    const url = new URL(withScheme);
+    if (!url.hostname.includes(".")) return null;
+    // Always https: Nifty issues a certificate for custom domains, and the
+    // token would otherwise ride an unencrypted request.
+    return `https://${url.host}`;
+  } catch {
+    return null;
+  }
 }
 
 /** True when an event should count as unread. */
