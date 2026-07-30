@@ -88,16 +88,6 @@ export const EVENT_KIND_LABELS: Record<EventKind, string> = {
 };
 
 /**
- * Path segment for a Nifty task, appended to the workspace host.
- *
- * Nifty's web app is a client-routed SPA that serves HTTP 200 for *every* path
- * (a nonsense URL returns 200 just like a real one), so this route could not be
- * verified from outside the app and is a best guess. If deep links land on the
- * wrong screen, this constant is the single place to correct.
- */
-const NIFTY_TASK_PATH = "task";
-
-/**
  * Resolve an event's deep link.
  *
  * Providers supply `url` where they can; this falls back for cached events
@@ -120,8 +110,12 @@ export function eventUrl(event: NormalizedEvent, instanceUrl?: string): string |
   if (event.provider === "youtrack" && event.subject.displayId) {
     return `${host}/issue/${event.subject.displayId}`;
   }
-  if (event.provider === "nifty" && event.subject.id) {
-    return `${host}/${NIFTY_TASK_PATH}/${event.subject.id}`;
+  // Verified format: Nifty's /l/{shortcode} share links resolve to
+  // /{project_id}/task/{task_id}. The trailing name slug in the resolved URL is
+  // cosmetic, so it is omitted — links stay correct when a task is renamed.
+  // A task is not addressable without its project.
+  if (event.provider === "nifty" && event.subject.id && event.subject.projectId) {
+    return `${host}/${event.subject.projectId}/task/${event.subject.id}`;
   }
   return undefined;
 }

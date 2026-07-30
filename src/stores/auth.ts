@@ -71,6 +71,15 @@ interface AuthState {
   getAccount: (accountId: string) => Account | undefined;
   /** Get credentials for a specific account. */
   getAccountCredentials: (accountId: string) => { url: string; token: string } | null;
+  /**
+   * Credentials plus the provider tag, for quick actions.
+   *
+   * Falls back to the first account so single-account callers that pass no ID
+   * keep working, matching getAccountCredentials' legacy behaviour.
+   */
+  getActionAccount: (
+    accountId?: string,
+  ) => { url: string; token: string; provider: ProviderKind } | null;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -380,6 +389,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const account = get().accounts.find((a) => a.id === accountId);
     if (!account) return null;
     return { url: account.url, token: account.token };
+  },
+
+  getActionAccount: (accountId?: string) => {
+    const { accounts } = get();
+    const account = accountId
+      ? accounts.find((a) => a.id === accountId)
+      : accounts[0];
+    if (!account) return null;
+    return {
+      url: account.url,
+      token: account.token,
+      provider: account.provider ?? "youtrack",
+    };
   },
 }));
 

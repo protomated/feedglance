@@ -332,6 +332,98 @@ async fn get_projects(
 
 // --- Epic 3: Quick Actions commands ---
 
+/// Build the action source for a provider.
+fn action_source_for(
+    kind: ProviderKind,
+    url: &str,
+    token: &str,
+) -> Box<dyn provider::actions::ActionSource> {
+    match kind {
+        ProviderKind::YouTrack => Box::new(provider::youtrack_provider::YouTrackProvider::new(
+            url, token, "",
+        )),
+        ProviderKind::Nifty => Box::new(provider::nifty::NiftyProvider::new(token, "")),
+    }
+}
+
+/// Post a comment on an item, for any provider.
+#[tauri::command]
+async fn post_item_comment(
+    provider: Option<String>,
+    url: String,
+    token: String,
+    item_id: String,
+    text: String,
+) -> Result<(), String> {
+    let kind = parse_provider(provider)?;
+    action_source_for(kind, &url, &token)
+        .comment(&item_id, &text)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Statuses selectable for an item's project, for any provider.
+#[tauri::command]
+async fn get_item_statuses(
+    provider: Option<String>,
+    url: String,
+    token: String,
+    project_id: String,
+) -> Result<Vec<provider::actions::StatusOption>, String> {
+    let kind = parse_provider(provider)?;
+    action_source_for(kind, &url, &token)
+        .statuses(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Apply a status to an item, for any provider.
+#[tauri::command]
+async fn set_item_status(
+    provider: Option<String>,
+    url: String,
+    token: String,
+    item_id: String,
+    status_id: String,
+) -> Result<(), String> {
+    let kind = parse_provider(provider)?;
+    action_source_for(kind, &url, &token)
+        .set_status(&item_id, &status_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// People assignable on an item's project, for any provider.
+#[tauri::command]
+async fn get_item_assignees(
+    provider: Option<String>,
+    url: String,
+    token: String,
+    project_id: String,
+) -> Result<Vec<provider::actions::AssigneeOption>, String> {
+    let kind = parse_provider(provider)?;
+    action_source_for(kind, &url, &token)
+        .assignees(&project_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Assign an item to a user, for any provider.
+#[tauri::command]
+async fn assign_item(
+    provider: Option<String>,
+    url: String,
+    token: String,
+    item_id: String,
+    assignee_id: String,
+) -> Result<(), String> {
+    let kind = parse_provider(provider)?;
+    action_source_for(kind, &url, &token)
+        .assign(&item_id, &assignee_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn execute_command(
     url: String,
@@ -481,6 +573,11 @@ pub fn run() {
             restore_activities,
             execute_command,
             post_comment,
+            post_item_comment,
+            get_item_statuses,
+            set_item_status,
+            get_item_assignees,
+            assign_item,
             get_project_states,
             get_project_team,
         ])

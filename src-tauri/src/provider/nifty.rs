@@ -36,6 +36,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use super::actions::{ActionSource, AssigneeOption, StatusOption};
 use super::{
     Cursor, EventActor, EventKind, EventSubject, FetchResult, NormalizedEvent, NotificationSource,
     ProviderError, ProviderKind,
@@ -238,16 +239,30 @@ impl NiftyProvider {
         }
     }
 
-    /// Deep link for a task, when the workspace host is configured.
+    /// Deep link for a task.
     ///
-    /// The `/task/` segment is unverified: Nifty's SPA serves HTTP 200 for every
-    /// path, so the route cannot be confirmed from outside the app. Mirrors
-    /// `NIFTY_TASK_PATH` in `src/types/event.ts`; correct both together.
-    fn task_url(&self, task_id: &str) -> Option<String> {
-        if self.workspace_url.is_empty() || task_id.is_empty() {
+    /// Format verified by opening a real share link in a browser: Nifty's
+    /// `/l/{shortcode}` links resolve to
+    /// `/{project_id}/task/{task_id}-{slugified-name}`.
+    ///
+    /// The trailing name slug is cosmetic — loading the bare
+    /// `/{project}/task/{id}` form resolves to the same task — so it is omitted
+    /// rather than derived, which keeps links correct when a task is renamed.
+    ///
+    /// The shortcode form is NOT reproducible: it appears nowhere in the API
+    /// (searched every task payload in a live workspace), so the canonical route
+    /// is the only one we can build.
+    ///
+    /// Requires the project ID; a task alone is not addressable.
+    fn task_url(&self, project_id: Option<&str>, task_id: &str) -> Option<String> {
+        let project_id = project_id?;
+        if self.workspace_url.is_empty() || project_id.is_empty() || task_id.is_empty() {
             return None;
         }
-        Some(format!("{}/task/{}", self.workspace_url, task_id))
+        Some(format!(
+            "{}/{}/task/{}",
+            self.workspace_url, project_id, task_id
+        ))
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {
@@ -388,7 +403,7 @@ impl NiftyProvider {
         // everything read and the feed goes permanently quiet.
         let seen_remotely = None;
 
-        let url = self.task_url(&subject.id);
+        let url = self.task_url(subject.project_id.as_deref(), &subject.id);
 
         NormalizedEvent {
             id: format!("nifty:{}", msg.id),
@@ -579,6 +594,180 @@ impl NotificationSource for NiftyProvider {
     }
 }
 
+/// Task-group ("status column") as returned by `GET /taskgroups`.
+#[derive(Debug, Deserialize)]
+struct NiftyTaskGroup {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    /// Present when the column represents completion.
+    #[serde(default)]
+    completed_group: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskGroupsResponse {
+    /// Note: this endpoint keys its payload `items`, unlike `/tasks` and
+    /// `/projects` which use their own names.
+    #[serde(default)]
+    items: Vec<NiftyTaskGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NiftyMember {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    avatar: Option<String>,
+    #[serde(default)]
+    removed: bool,
+    #[serde(default)]
+    pending: bool,
+}
+
+impl NiftyProvider {
+    /// Send a JSON body and discard the response, mapping status to a typed error.
+    async fn send_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<(), ProviderError> {
+        let resp = self
+            .client
+            .request(method, format!("{}/{}", API_BASE, path))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(60);
+            return Err(ProviderError::RateLimited(retry));
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(ProviderError::Auth(format!(
+                "Nifty rejected the token ({})",
+                status.as_u16()
+            )));
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::Other(format!(
+                "Nifty API {} on /{}: {}",
+                status.as_u16(),
+                path,
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ActionSource for NiftyProvider {
+    async fn comment(&self, item_id: &str, text: &str) -> Result<(), ProviderError> {
+        if text.trim().is_empty() {
+            return Err(ProviderError::Other("Comment text is empty".into()));
+        }
+        // Verified live: type=text + task_id creates a task comment (HTTP 201).
+        self.send_json(
+            reqwest::Method::POST,
+            "messages",
+            serde_json::json!({
+                "type": "text",
+                "text": text,
+                "task_id": item_id,
+            }),
+        )
+        .await
+    }
+
+    async fn statuses(&self, project_id: &str) -> Result<Vec<StatusOption>, ProviderError> {
+        if project_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        // `archived`, `limit` and `offset` are documented as optional but the
+        // server returns 400 without them.
+        let r: TaskGroupsResponse = self
+            .get(&format!(
+                "taskgroups?project_id={}&archived=false&limit=200&offset=0",
+                urlencoding::encode(project_id)
+            ))
+            .await?;
+
+        Ok(r.items
+            .into_iter()
+            .map(|g| StatusOption {
+                is_resolved: g
+                    .completed_group
+                    .as_ref()
+                    .map(|v| !v.is_null() && v.as_bool() != Some(false))
+                    .unwrap_or(false),
+                name: g.name.unwrap_or_else(|| g.id.clone()),
+                id: g.id,
+            })
+            .collect())
+    }
+
+    async fn set_status(&self, item_id: &str, status_id: &str) -> Result<(), ProviderError> {
+        // In Nifty a task's status IS its board column.
+        self.send_json(
+            reqwest::Method::PUT,
+            &format!("tasks/{}", urlencoding::encode(item_id)),
+            serde_json::json!({ "task_group_id": status_id }),
+        )
+        .await
+    }
+
+    async fn assignees(&self, project_id: &str) -> Result<Vec<AssigneeOption>, ProviderError> {
+        if project_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let members: Vec<NiftyMember> = self
+            .get(&format!(
+                "members?project_id={}",
+                urlencoding::encode(project_id)
+            ))
+            .await?;
+
+        Ok(members
+            .into_iter()
+            .filter(|m| !m.removed && !m.pending)
+            .map(|m| AssigneeOption {
+                login: m.email.clone().unwrap_or_default(),
+                name: m
+                    .name
+                    .or(m.email)
+                    .unwrap_or_else(|| m.id.clone()),
+                avatar_url: m.avatar.unwrap_or_default(),
+                id: m.id,
+            })
+            .collect())
+    }
+
+    async fn assign(&self, item_id: &str, assignee_id: &str) -> Result<(), ProviderError> {
+        // `assignees` replaces the whole list, so this sets a single assignee
+        // rather than adding one.
+        self.send_json(
+            reqwest::Method::PUT,
+            &format!("tasks/{}", urlencoding::encode(item_id)),
+            serde_json::json!({ "assignees": [assignee_id] }),
+        )
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,12 +815,54 @@ mod tests {
         }
     }
 
+    /// Read-only halves of the quick actions, against the live API. The write
+    /// halves (set_status/assign/comment) are deliberately not exercised here —
+    /// they mutate a real workspace.
+    #[tokio::test]
+    #[ignore]
+    async fn quick_action_options_live() {
+        let token = std::env::var("NIFTY_TOKEN").expect("NIFTY_TOKEN not set");
+        let uid = NiftyProvider::new(&token, "").validate().await.unwrap();
+        let p = NiftyProvider::new(&token, &uid);
+
+        const PROJECT: &str = "iVLWyIgDPUTn4W";
+
+        let statuses = p.statuses(PROJECT).await.expect("statuses failed");
+        println!("statuses: {}", statuses.len());
+        for s in statuses.iter().take(5) {
+            println!("  {} => {}", s.id, s.name);
+        }
+        assert!(!statuses.is_empty(), "no status columns returned");
+        assert!(
+            statuses.iter().all(|s| !s.id.is_empty() && !s.name.is_empty()),
+            "a status option is missing an id or name"
+        );
+
+        let people = p.assignees(PROJECT).await.expect("assignees failed");
+        println!("assignees: {}", people.len());
+        for a in people.iter().take(5) {
+            println!("  {} => {}", a.id, a.name);
+        }
+        assert!(
+            people.iter().all(|a| !a.id.is_empty() && !a.name.is_empty()),
+            "an assignee option is missing an id or name"
+        );
+    }
+
+    /// An empty comment must be rejected before any network call.
+    #[tokio::test]
+    async fn empty_comment_is_rejected() {
+        let p = NiftyProvider::new("t", "u");
+        assert!(p.comment("task", "   ").await.is_err());
+    }
+
     #[test]
-    fn task_url_uses_configured_workspace_host() {
+    fn task_url_matches_verified_canonical_format() {
+        // Verified in a browser: /l/{code} resolves to /{project}/task/{task}.
         let p = NiftyProvider::with_workspace("t", "u", "https://protomated.nifty.pm");
         assert_eq!(
-            p.task_url("abc123").as_deref(),
-            Some("https://protomated.nifty.pm/task/abc123")
+            p.task_url(Some("iVLWyIgDPUTn4W"), "ymaf9QHxcUq!Uc").as_deref(),
+            Some("https://protomated.nifty.pm/iVLWyIgDPUTn4W/task/ymaf9QHxcUq!Uc")
         );
     }
 
@@ -639,8 +870,8 @@ mod tests {
     fn task_url_supports_cname_custom_domain() {
         let p = NiftyProvider::with_workspace("t", "u", "https://portal.protomated.com");
         assert_eq!(
-            p.task_url("abc123").as_deref(),
-            Some("https://portal.protomated.com/task/abc123")
+            p.task_url(Some("proj"), "abc123").as_deref(),
+            Some("https://portal.protomated.com/proj/task/abc123")
         );
     }
 
@@ -648,16 +879,19 @@ mod tests {
     fn task_url_tolerates_trailing_slash() {
         let p = NiftyProvider::with_workspace("t", "u", "https://acme.nifty.pm/");
         assert_eq!(
-            p.task_url("x").as_deref(),
-            Some("https://acme.nifty.pm/task/x")
+            p.task_url(Some("proj"), "x").as_deref(),
+            Some("https://acme.nifty.pm/proj/task/x")
         );
     }
 
-    /// Without a configured host there is no correct URL to build — emitting a
-    /// guessed one would deep-link users into a workspace they cannot open.
+    /// Without a host or a project there is no addressable URL — emitting a
+    /// guessed one would deep-link users somewhere they cannot open.
     #[test]
-    fn task_url_is_none_without_workspace() {
-        assert!(NiftyProvider::new("t", "u").task_url("abc").is_none());
+    fn task_url_is_none_without_workspace_or_project() {
+        assert!(NiftyProvider::new("t", "u").task_url(Some("p"), "abc").is_none());
+        let p = NiftyProvider::with_workspace("t", "u", "https://acme.nifty.pm");
+        assert!(p.task_url(None, "abc").is_none());
+        assert!(p.task_url(Some(""), "abc").is_none());
     }
 
     #[test]

@@ -446,6 +446,23 @@ export function resolveIssueId(activity: ActivityItem): string | null {
   return null;
 }
 
+/**
+ * Resolve the provider-native item ID used for mutations.
+ *
+ * Distinct from {@link resolveIssueId}, which returns the human-facing ID
+ * (`PROJ-123`). YouTrack's command API accepts either, but Nifty's REST calls
+ * need its opaque task ID — passing the display ID there silently 404s.
+ */
+export function resolveActionItemId(activity: ActivityItem): string | null {
+  const t = activity.target;
+  if (!t) return null;
+  // For comments the mutation targets the parent item, not the comment.
+  if (t.targetType === "IssueComment" || t.targetType === "ArticleComment") {
+    return t.issue?.id ?? t.id ?? null;
+  }
+  return t.id ?? t.issue?.id ?? null;
+}
+
 /** Resolve the project ID for fetching states/team. */
 function resolveProjectId(activity: ActivityItem): string | null {
   const t = activity.target;
@@ -512,6 +529,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   const resolved = targetLabel(activity);
 
   const issueId = resolveIssueId(activity);
+  // Mutations must use the native ID; the display ID is for rendering only.
+  const actionItemId = resolveActionItemId(activity) ?? issueId;
   const projectId = resolveProjectId(activity);
   const canAct = !!issueId; // Quick actions only work on issues
 
@@ -638,7 +657,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
               </button>
 
               {/* Status */}
-              {projectId && (
+              {projectId && actionItemId && (
                 <div className="relative">
                   <button
                     onClick={(e) => {
@@ -659,7 +678,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
                   </button>
                   {activeAction === "status" && (
                     <StatusDropdown
-                      issueId={issueId!}
+                      issueId={actionItemId!}
                       projectId={projectId}
                       accountId={activity.accountId}
                       onClose={() => setActiveAction(null)}
@@ -669,7 +688,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
               )}
 
               {/* Assign */}
-              {projectId && (
+              {projectId && actionItemId && (
                 <div className="relative">
                   <button
                     onClick={(e) => {
@@ -689,7 +708,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
                   </button>
                   {activeAction === "assign" && (
                     <AssignDropdown
-                      issueId={issueId!}
+                      issueId={actionItemId!}
                       projectId={projectId}
                       accountId={activity.accountId}
                       onClose={() => setActiveAction(null)}
@@ -745,9 +764,9 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
       </div>
 
       {/* Inline reply panel */}
-      {activeAction === "reply" && issueId && (
+      {activeAction === "reply" && actionItemId && (
         <InlineReply
-          issueId={issueId}
+          issueId={actionItemId}
           activityId={activity.id}
           projectId={projectId ?? undefined}
           accountId={activity.accountId}

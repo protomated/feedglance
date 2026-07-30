@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 
+use super::actions::{ActionSource, AssigneeOption, StatusOption};
 use super::{
     Cursor, EventActor, EventKind, EventSubject, FetchResult, NormalizedEvent, NotificationSource,
     ProviderError, ProviderKind,
@@ -208,6 +209,87 @@ impl NotificationSource for YouTrackProvider {
     }
 }
 
+/// YouTrack mutations go through the command API, which takes natural-language
+/// command strings rather than typed fields.
+#[async_trait]
+impl ActionSource for YouTrackProvider {
+    async fn comment(&self, item_id: &str, text: &str) -> Result<(), ProviderError> {
+        if text.trim().is_empty() {
+            return Err(ProviderError::Other("Comment text is empty".into()));
+        }
+        self.client
+            .post_comment(item_id, text)
+            .await
+            .map(|_| ())
+            .map_err(|e| ProviderError::Other(e.to_string()))
+    }
+
+    async fn statuses(&self, project_id: &str) -> Result<Vec<StatusOption>, ProviderError> {
+        let states = self
+            .client
+            .get_project_states(project_id)
+            .await
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        Ok(states
+            .into_iter()
+            .map(|s| StatusOption {
+                id: s.name.clone(),
+                name: s.name,
+                is_resolved: s.is_resolved,
+            })
+            .collect())
+    }
+
+    async fn set_status(&self, item_id: &str, status_id: &str) -> Result<(), ProviderError> {
+        // The command API identifies states by name, so `status_id` carries the
+        // state name (see `statuses` above). Quote it so multi-word states like
+        // "In Progress" are parsed as one value.
+        self.client
+            .post_command(item_id, &format!("State {}", quote_if_needed(status_id)))
+            .await
+            .map(|_| ())
+            .map_err(|e| ProviderError::Other(e.to_string()))
+    }
+
+    async fn assignees(&self, project_id: &str) -> Result<Vec<AssigneeOption>, ProviderError> {
+        let team = self
+            .client
+            .get_project_team(project_id)
+            .await
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        Ok(team
+            .into_iter()
+            .map(|m| AssigneeOption {
+                // Commands address users by login, so that is the applied ID.
+                id: m.login.clone(),
+                login: m.login,
+                name: m.name,
+                avatar_url: m.avatar_url,
+            })
+            .collect())
+    }
+
+    async fn assign(&self, item_id: &str, assignee_id: &str) -> Result<(), ProviderError> {
+        self.client
+            .post_command(item_id, &format!("for {}", quote_if_needed(assignee_id)))
+            .await
+            .map(|_| ())
+            .map_err(|e| ProviderError::Other(e.to_string()))
+    }
+}
+
+/// Wrap a command value in braces when it contains spaces.
+///
+/// YouTrack's command parser splits on whitespace, so `State In Progress` would
+/// be read as the state `In` followed by junk. `State {In Progress}` is correct.
+fn quote_if_needed(value: &str) -> String {
+    if value.contains(char::is_whitespace) {
+        format!("{{{}}}", value)
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +311,13 @@ mod tests {
             activity_type: None,
             account_id: String::new(),
         }
+    }
+
+    #[test]
+    fn multi_word_state_is_brace_quoted() {
+        // "State In Progress" would parse as state "In"; braces keep it one value.
+        assert_eq!(quote_if_needed("In Progress"), "{In Progress}");
+        assert_eq!(quote_if_needed("Open"), "Open");
     }
 
     #[test]
