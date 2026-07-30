@@ -8,6 +8,8 @@ import type {
   ActivityProject,
   NotificationGroup,
 } from "../types/activity";
+import type { NormalizedEvent } from "../types/event";
+import { toActivityItems } from "../types/compat";
 
 const READ_STORE_NAME = "read_ids.json";
 const KEY_PINNED_IDS = "pinned_ids";
@@ -49,13 +51,13 @@ function activitiesKey(accountId: string): string {
  * items survive a restart (debounced — refresh() can fire on every poll).
  */
 let activitiesPersistTimer: ReturnType<typeof setTimeout> | null = null;
-async function persistActivities(activities: ActivityItem[]) {
+async function persistActivities(activities: NormalizedEvent[]) {
   if (activitiesPersistTimer) clearTimeout(activitiesPersistTimer);
   activitiesPersistTimer = setTimeout(async () => {
     try {
       const store = await getActivitiesStore();
       // Group by account; trust input is already newest-first from the backend.
-      const byAccount = new Map<string, ActivityItem[]>();
+      const byAccount = new Map<string, NormalizedEvent[]>();
       for (const a of activities) {
         const acctId = a.accountId || "";
         const list = byAccount.get(acctId) ?? [];
@@ -79,10 +81,23 @@ async function persistActivities(activities: ActivityItem[]) {
 async function restoreActivitiesForAccount(accountId: string): Promise<void> {
   try {
     const store = await getActivitiesStore();
-    const cached = await store.get<ActivityItem[]>(activitiesKey(accountId));
-    if (cached && cached.length > 0) {
-      await invoke("restore_activities", { activities: cached, accountId });
+    const cached = await store.get<NormalizedEvent[]>(activitiesKey(accountId));
+    if (!cached || cached.length === 0) return;
+
+    // Caches written by older builds hold legacy YouTrack activities, which the
+    // backend can no longer deserialize. Dropping them is safe: the next poll
+    // refetches the last 24h. Detected by the absence of `subject`, which every
+    // NormalizedEvent has.
+    const normalized = cached.filter(
+      (e) => e && typeof e === "object" && "subject" in e,
+    );
+    if (normalized.length === 0) {
+      await store.delete(activitiesKey(accountId));
+      await store.save();
+      return;
     }
+
+    await invoke("restore_activities", { activities: normalized, accountId });
   } catch {
     // No cache yet, or backend not ready
   }
@@ -385,13 +400,16 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
 
   refresh: async () => {
     try {
-      const activities = await invoke<ActivityItem[]>("get_activities", { accountId: null });
+      const events = await invoke<NormalizedEvent[]>("get_activities", {
+        accountId: null,
+      });
+      // Persist the normalized form — it is what restore_activities expects.
+      persistActivities(events);
+      // Components still render the legacy shape; convert at this boundary.
       set({
-        activities,
+        activities: toActivityItems(events),
         error: null,
       });
-      // Persist the feed so it survives a restart (debounced internally).
-      persistActivities(activities);
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
     }

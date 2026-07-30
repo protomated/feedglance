@@ -12,12 +12,43 @@ use tokio::sync::{Mutex, RwLock};
 
 use cache::SharedProjectCache;
 use polling::{AccountPollingState, FocusState, PollingManager, SharedPollingState};
+use provider::{NormalizedEvent, ProviderKind};
 use youtrack::YouTrackClient;
+
+/// Parse a provider tag from the frontend, defaulting to YouTrack so existing
+/// callers that omit it keep working.
+fn parse_provider(tag: Option<String>) -> Result<ProviderKind, String> {
+    match tag.as_deref() {
+        None | Some("") | Some("youtrack") => Ok(ProviderKind::YouTrack),
+        Some("nifty") => Ok(ProviderKind::Nifty),
+        Some(other) => Err(format!("Unknown provider: {}", other)),
+    }
+}
 
 #[tauri::command]
 async fn validate_connection(url: String, token: String) -> Result<youtrack::UserInfo, String> {
     let client = YouTrackClient::new(&url, &token);
     client.get_current_user().await.map_err(|e| e.to_string())
+}
+
+/// Validate credentials for any provider, returning the current user's ID.
+///
+/// Nifty ignores `url` — its API host is fixed.
+#[tauri::command]
+async fn validate_provider(
+    provider: Option<String>,
+    url: String,
+    token: String,
+) -> Result<String, String> {
+    use provider::NotificationSource;
+    let kind = parse_provider(provider)?;
+    let source: Box<dyn NotificationSource> = match kind {
+        ProviderKind::YouTrack => {
+            Box::new(provider::youtrack_provider::YouTrackProvider::new(&url, &token, ""))
+        }
+        ProviderKind::Nifty => Box::new(provider::nifty::NiftyProvider::new(&token, "")),
+    };
+    source.validate().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -36,17 +67,22 @@ async fn start_polling(
     url: String,
     token: String,
     current_user_id: Option<String>,
+    provider: Option<String>,
 ) -> Result<(), String> {
+    let kind = parse_provider(provider)?;
     let mut mgr = state.write().await;
     let uid = current_user_id.unwrap_or_default();
     if let Some(acct) = mgr.accounts.get_mut(&account_id) {
         acct.url = url;
         acct.token = token;
         acct.current_user_id = uid;
+        acct.provider = kind;
         acct.running = true;
     } else {
-        mgr.accounts
-            .insert(account_id, AccountPollingState::new(url, token, uid));
+        mgr.accounts.insert(
+            account_id,
+            AccountPollingState::with_provider(kind, url, token, uid),
+        );
     }
     Ok(())
 }
@@ -101,17 +137,17 @@ async fn set_focus_state(
 async fn get_activities(
     state: tauri::State<'_, SharedPollingState>,
     account_id: Option<String>,
-) -> Result<Vec<activities::ActivityItem>, String> {
+) -> Result<Vec<NormalizedEvent>, String> {
     let mgr = state.read().await;
     match account_id {
         Some(id) => {
             if let Some(acct) = mgr.accounts.get(&id) {
-                Ok(acct.activities.clone())
+                Ok(acct.events.clone())
             } else {
                 Ok(vec![])
             }
         }
-        None => Ok(mgr.all_activities()),
+        None => Ok(mgr.all_events()),
     }
 }
 
@@ -150,7 +186,7 @@ async fn mark_all_read(
     match account_id {
         Some(id) => {
             if let Some(acct) = mgr.accounts.get_mut(&id) {
-                let all_ids: Vec<String> = acct.activities.iter().map(|a| a.id.clone()).collect();
+                let all_ids: Vec<String> = acct.events.iter().map(|a| a.id.clone()).collect();
                 for id in all_ids {
                     acct.read_ids.insert(id);
                 }
@@ -158,7 +194,7 @@ async fn mark_all_read(
         }
         None => {
             for acct in mgr.accounts.values_mut() {
-                let all_ids: Vec<String> = acct.activities.iter().map(|a| a.id.clone()).collect();
+                let all_ids: Vec<String> = acct.events.iter().map(|a| a.id.clone()).collect();
                 for id in all_ids {
                     acct.read_ids.insert(id);
                 }
@@ -218,20 +254,25 @@ async fn set_read_ids(
     Ok(())
 }
 
-/// Restore a disk-cached set of activities into an account's in-memory state.
+/// Restore a disk-cached set of events into an account's in-memory state.
 ///
 /// Called once on startup (before polling begins) so unread items survive a
-/// restart instead of being limited to the 24h re-fetch window. Seeds the
-/// activity list, the dedup `seen_ids` set, and the polling `watermark` so the
-/// next poll resumes incrementally rather than re-scanning the last 24 hours.
+/// restart instead of being limited to the 24h re-fetch window. Seeds the event
+/// list, the dedup `seen_ids` set, and the cursor watermark so the next poll
+/// resumes incrementally rather than re-scanning the last 24 hours.
+///
+/// Only the watermark is restored, never provider-specific cursor state: Nifty's
+/// fingerprint map describes tasks as they were at snapshot time, and replaying a
+/// stale one would mark every task unchanged and suppress real events. Leaving it
+/// empty costs one full sweep on startup and is always correct.
 ///
 /// If the account state does not exist yet (polling not started), a placeholder
 /// is created with empty credentials; `start_polling` later fills those in
-/// without clearing the restored activities.
+/// without clearing the restored events.
 #[tauri::command]
 async fn restore_activities(
     state: tauri::State<'_, SharedPollingState>,
-    activities: Vec<activities::ActivityItem>,
+    activities: Vec<NormalizedEvent>,
     account_id: String,
 ) -> Result<(), String> {
     let mut mgr = state.write().await;
@@ -240,27 +281,27 @@ async fn restore_activities(
         .entry(account_id.clone())
         .or_insert_with(|| AccountPollingState::new(String::new(), String::new(), String::new()));
 
-    // Only seed an empty cache — never clobber activities a live poll already fetched.
-    if !acct.activities.is_empty() {
+    // Only seed an empty cache — never clobber events a live poll already fetched.
+    if !acct.events.is_empty() {
         return Ok(());
     }
 
-    let mut max_ts = acct.watermark;
-    for mut activity in activities {
+    let mut max_ts = acct.cursor.watermark;
+    for mut event in activities {
         // Re-stamp the account ID (skipped during deserialization).
-        activity.account_id = account_id.clone();
-        if acct.seen_ids.contains(&activity.id) {
+        event.account_id = account_id.clone();
+        if acct.seen_ids.contains(&event.id) {
             continue;
         }
-        if activity.timestamp > max_ts {
-            max_ts = activity.timestamp;
+        if event.timestamp > max_ts {
+            max_ts = event.timestamp;
         }
-        acct.seen_ids.insert(activity.id.clone());
-        acct.activities.push(activity);
+        acct.seen_ids.insert(event.id.clone());
+        acct.events.push(event);
     }
-    // Cached activities are stored newest-first; keep that ordering.
-    acct.activities.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    acct.watermark = max_ts;
+    // Cached events are stored newest-first; keep that ordering.
+    acct.events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    acct.cursor.watermark = max_ts;
     Ok(())
 }
 
@@ -398,6 +439,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             validate_connection,
+            validate_provider,
             check_connection,
             start_polling,
             stop_polling,
