@@ -4,7 +4,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAuthStore } from "../stores/auth";
-import { isValidYouTrackCloudUrl, normalizeUrl } from "../services/validation";
+import { PROVIDER_LIST, PROVIDERS, providerOf } from "../services/providers";
+import type { ProviderKind } from "../types/youtrack";
 import { DEFAULT_SHORTCUT } from "../App";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { Account } from "../types/youtrack";
@@ -70,6 +71,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
   // Add account form state
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [newUrl, setNewUrl] = useState("");
+  const [newProvider, setNewProvider] = useState<ProviderKind>("youtrack");
   const [newToken, setNewToken] = useState("");
   const [addError, setAddError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
@@ -126,21 +128,30 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
     e.preventDefault();
     setAddError(null);
 
-    if (!isValidYouTrackCloudUrl(newUrl)) {
-      setAddError("Please enter a valid YouTrack Cloud URL (e.g. myteam.youtrack.cloud)");
+    const descriptor = PROVIDERS[newProvider];
+
+    if (!newToken.trim()) {
+      setAddError(`Please enter your ${descriptor.tokenLabel.toLowerCase()}`);
       return;
     }
-    if (!newToken.trim()) {
-      setAddError("Please enter your permanent token");
+    if (descriptor.hostRequired && !newUrl.trim()) {
+      setAddError(`Please enter your ${descriptor.hostLabel.toLowerCase()}`);
+      return;
+    }
+
+    const normalized = descriptor.normalizeHost(newUrl);
+    if ("error" in normalized) {
+      setAddError(normalized.error);
       return;
     }
 
     setAdding(true);
     try {
-      await addAccount(normalizeUrl(newUrl), newToken.trim());
+      await addAccount(normalized.value, newToken.trim(), newProvider);
       setShowAddAccount(false);
       setNewUrl("");
       setNewToken("");
+      setNewProvider("youtrack");
     } catch (e) {
       setAddError(e instanceof Error ? e.message : "Failed to add account");
     } finally {
@@ -177,11 +188,43 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
         {/* Add account form */}
         {showAddAccount && (
           <form onSubmit={handleAddAccount} className="mb-3 p-2.5 rounded-lg bg-gray-50 dark:bg-gray-800 space-y-2">
+            <div className="grid grid-cols-2 gap-1.5" role="radiogroup">
+              {PROVIDER_LIST.map((p) => {
+                const selected = p.kind === newProvider;
+                return (
+                  <button
+                    key={p.kind}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={adding}
+                    onClick={() => {
+                      setNewProvider(p.kind);
+                      // The host means different things per provider; a
+                      // leftover value is never valid for the other.
+                      setNewUrl("");
+                      setAddError(null);
+                    }}
+                    className={`px-2 py-1.5 rounded border text-xs font-medium transition-colors disabled:opacity-50 ${
+                      selected
+                        ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+                        : "border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300"
+                    }`}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+            </div>
             <input
               type="text"
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
-              placeholder="myteam.youtrack.cloud"
+              placeholder={
+                PROVIDERS[newProvider].hostRequired
+                  ? PROVIDERS[newProvider].hostPlaceholder
+                  : `${PROVIDERS[newProvider].hostPlaceholder} (optional)`
+              }
               disabled={adding}
               className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
             />
@@ -189,7 +232,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
               type="password"
               value={newToken}
               onChange={(e) => setNewToken(e.target.value)}
-              placeholder="Permanent token"
+              placeholder={PROVIDERS[newProvider].tokenPlaceholder}
               disabled={adding}
               className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 disabled:opacity-50"
             />
@@ -465,7 +508,9 @@ function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnectio
             {account.user?.fullName || account.label}
           </p>
           <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-            {account.url}
+            {/* Nifty's workspace URL is optional, so fall back to the provider
+                name rather than rendering an empty line. */}
+            {account.url || providerOf(account.provider).name}
           </p>
         </div>
         <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />

@@ -600,6 +600,32 @@ mod tests {
         }
     }
 
+    /// The exact call onboarding makes when a user connects a Nifty account:
+    /// validate a token with no workspace host configured. Must return the user
+    /// ID, since the UI keys the account on it.
+    #[tokio::test]
+    #[ignore]
+    async fn onboarding_validate_live() {
+        let token = std::env::var("NIFTY_TOKEN").expect("NIFTY_TOKEN not set");
+        let p = NiftyProvider::new(&token, "");
+        let uid = p.validate().await.expect("validate failed");
+        println!("validate returned user id: {}", uid);
+        assert!(!uid.is_empty(), "validate returned an empty user id");
+    }
+
+    /// A bad token must fail cleanly as an auth error, not hang or panic —
+    /// onboarding surfaces this message directly to the user.
+    #[tokio::test]
+    #[ignore]
+    async fn onboarding_rejects_bad_token_live() {
+        let p = NiftyProvider::new("definitely-not-a-real-token", "");
+        match p.validate().await {
+            Err(ProviderError::Auth(m)) => println!("rejected as auth error: {}", m),
+            Err(other) => println!("rejected as: {}", other),
+            Ok(id) => panic!("bogus token unexpectedly validated as {}", id),
+        }
+    }
+
     #[test]
     fn task_url_uses_configured_workspace_host() {
         let p = NiftyProvider::with_workspace("t", "u", "https://protomated.nifty.pm");

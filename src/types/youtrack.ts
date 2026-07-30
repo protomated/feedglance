@@ -1,3 +1,6 @@
+/** Which PM backend an account talks to. */
+export type ProviderKind = "youtrack" | "nifty";
+
 export interface UserInfo {
   id: string;
   login: string;
@@ -11,15 +14,24 @@ export interface Credentials {
   token: string;
 }
 
-/** A YouTrack Cloud account with its credentials and user info. */
+/** A connected account with its credentials and user info. */
 export interface Account {
-  /** Deterministic ID derived from the normalized URL. */
+  /** Deterministic ID derived from the provider and its identifying key. */
   id: string;
+  /**
+   * YouTrack: the instance URL, required — it is the API host.
+   *
+   * Nifty: the workspace origin used for deep links (`{slug}.nifty.pm` or a
+   * CNAME custom domain). Optional, and NOT an API host — Nifty's API lives at
+   * a fixed address. Empty simply means events carry no deep link.
+   */
   url: string;
   token: string;
   user: UserInfo;
   /** User-editable display name; defaults to the hostname. */
   label?: string;
+  /** Defaults to "youtrack" when absent, so accounts saved by older builds load. */
+  provider?: ProviderKind;
 }
 
 // --- Epic 3: Quick Actions types ---
