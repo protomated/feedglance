@@ -5,19 +5,26 @@ use tokio::time::{sleep, Duration};
 
 use tauri::{AppHandle, Emitter};
 
-use crate::activities::ActivityItem;
-use crate::youtrack::YouTrackClient;
+use crate::provider::nifty::NiftyProvider;
+use crate::provider::youtrack_provider::YouTrackProvider;
+use crate::provider::{
+    Cursor, EventKind, NormalizedEvent, NotificationSource, ProviderError, ProviderKind,
+};
 
 /// Polling interval tiers (in seconds).
 const INTERVAL_FOCUSED: u64 = 30;
 const INTERVAL_MINIMIZED: u64 = 60;
 const INTERVAL_IDLE: u64 = 120;
 
-/// Max activities per request.
-const ACTIVITIES_PER_PAGE: u32 = 100;
+/// Per-cycle API call budget handed to each provider.
+///
+/// YouTrack ignores this (one call per cycle). Nifty uses it to bound fan-out:
+/// its 200 GET/min limit is team-scoped, so it is shared by every user running
+/// this app in the same workspace. Staying well under lets N clients coexist.
+const CALL_BUDGET: u32 = 40;
 
-/// Duration for initial load window (24 hours in ms).
-const INITIAL_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+/// Max events retained per account before pruning.
+const MAX_EVENTS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusState {
@@ -40,19 +47,21 @@ impl FocusState {
 pub struct AccountPollingState {
     /// Whether polling is active for this account.
     pub running: bool,
-    /// Timestamp watermark (unix ms) — poll activities after this.
-    pub watermark: i64,
-    /// Set of seen activity IDs for deduplication.
+    /// Provider-owned resume point (watermark and/or opaque provider state).
+    pub cursor: Cursor,
+    /// Set of seen event IDs for deduplication.
     pub seen_ids: HashSet<String>,
-    /// Cached activities (most recent first).
-    pub activities: Vec<ActivityItem>,
-    /// Read activity IDs.
+    /// Cached events (most recent first).
+    pub events: Vec<NormalizedEvent>,
+    /// Read event IDs.
     pub read_ids: HashSet<String>,
-    /// Muted issue IDs (readable IDs like "PROJ-123") — skip OS notifications for these.
+    /// Muted item IDs (display IDs like "PROJ-123") — skip OS notifications.
     pub muted_issues: HashSet<String>,
-    /// Current user ID — activities from this user are excluded.
+    /// Current user ID — events from this user are excluded.
     pub current_user_id: String,
-    /// Credentials for polling.
+    /// Which backend this account talks to.
+    pub provider: ProviderKind,
+    /// Credentials. `url` is unused for Nifty (fixed API host).
     pub url: String,
     pub token: String,
     /// Consecutive poll failures for backoff.
@@ -61,17 +70,55 @@ pub struct AccountPollingState {
 
 impl AccountPollingState {
     pub fn new(url: String, token: String, current_user_id: String) -> Self {
+        Self::with_provider(ProviderKind::YouTrack, url, token, current_user_id)
+    }
+
+    pub fn with_provider(
+        provider: ProviderKind,
+        url: String,
+        token: String,
+        current_user_id: String,
+    ) -> Self {
         Self {
             running: true,
-            watermark: 0,
+            cursor: Cursor::default(),
             seen_ids: HashSet::new(),
-            activities: Vec::new(),
+            events: Vec::new(),
             read_ids: HashSet::new(),
             muted_issues: HashSet::new(),
             current_user_id,
+            provider,
             url,
             token,
             consecutive_failures: 0,
+        }
+    }
+
+    /// Build the provider for this account.
+    ///
+    /// Constructed fresh each cycle so credential updates take effect without
+    /// restarting the loop.
+    fn source(&self) -> Box<dyn NotificationSource> {
+        match self.provider {
+            ProviderKind::YouTrack => Box::new(YouTrackProvider::new(
+                &self.url,
+                &self.token,
+                &self.current_user_id,
+            )),
+            ProviderKind::Nifty => {
+                Box::new(NiftyProvider::new(&self.token, &self.current_user_id))
+            }
+        }
+    }
+
+    /// Credentials sufficient to poll? Nifty needs no URL.
+    fn is_pollable(&self) -> bool {
+        if self.token.is_empty() {
+            return false;
+        }
+        match self.provider {
+            ProviderKind::YouTrack => !self.url.is_empty(),
+            ProviderKind::Nifty => true,
         }
     }
 }
@@ -90,25 +137,31 @@ impl PollingManager {
         }
     }
 
-    /// Get merged activities from all accounts, sorted by timestamp descending.
-    pub fn all_activities(&self) -> Vec<ActivityItem> {
-        let mut all: Vec<ActivityItem> = self
+    /// Get merged events from all accounts, sorted by timestamp descending.
+    pub fn all_events(&self) -> Vec<NormalizedEvent> {
+        let mut all: Vec<NormalizedEvent> = self
             .accounts
             .values()
-            .flat_map(|a| a.activities.iter().cloned())
+            .flat_map(|a| a.events.iter().cloned())
             .collect();
         all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         all
     }
 
-    /// Get total unread count across all accounts.
+    /// Total unread count across all accounts.
+    ///
+    /// Providers with server-side read state (Nifty `seen_by`) are trusted over
+    /// the local set, so read state follows the user across devices.
     pub fn total_unread_count(&self) -> u32 {
         self.accounts
             .values()
             .map(|a| {
-                a.activities
+                a.events
                     .iter()
-                    .filter(|act| !a.read_ids.contains(&act.id))
+                    .filter(|e| match e.seen_remotely {
+                        Some(seen) => !seen,
+                        None => !a.read_ids.contains(&e.id),
+                    })
                     .count() as u32
             })
             .sum()
@@ -117,60 +170,59 @@ impl PollingManager {
 
 pub type SharedPollingState = Arc<RwLock<PollingManager>>;
 
+/// Snapshot of what a cycle needs, taken under a read lock so the poll itself
+/// runs lock-free.
+struct PollTarget {
+    account_id: String,
+    source: Box<dyn NotificationSource>,
+    cursor: Cursor,
+    muted: HashSet<String>,
+    is_initial: bool,
+    min_interval: u64,
+}
+
 /// Start the background polling loop.
-/// Iterates over all accounts each cycle.
-pub fn start_polling_loop(
-    app_handle: AppHandle,
-    state: SharedPollingState,
-    _cancel: Arc<Mutex<()>>,
-) {
+pub fn start_polling_loop(app_handle: AppHandle, state: SharedPollingState, _cancel: Arc<Mutex<()>>) {
     tauri::async_runtime::spawn(async move {
         loop {
-            // Snapshot account info and global settings
-            let (account_snapshots, interval_secs) = {
+            let (targets, interval_secs, max_failures) = {
                 let mgr = state.read().await;
-                let interval = mgr.focus_state.interval_secs();
-                let snapshots: Vec<(String, String, String, i64, u32, String, HashSet<String>)> = mgr
-                    .accounts
-                    .iter()
-                    .filter(|(_, a)| a.running && !a.url.is_empty() && !a.token.is_empty())
-                    .map(|(id, a)| {
-                        (
-                            id.clone(),
-                            a.url.clone(),
-                            a.token.clone(),
-                            a.watermark,
-                            a.consecutive_failures,
-                            a.current_user_id.clone(),
-                            a.muted_issues.clone(),
-                        )
-                    })
-                    .collect();
-                (snapshots, interval)
+                let base = mgr.focus_state.interval_secs();
+                let mut targets = Vec::new();
+                let mut max_failures = 0u32;
+
+                for (id, acct) in mgr.accounts.iter() {
+                    if !acct.running || !acct.is_pollable() {
+                        continue;
+                    }
+                    max_failures = max_failures.max(acct.consecutive_failures);
+                    targets.push(PollTarget {
+                        account_id: id.clone(),
+                        source: acct.source(),
+                        cursor: acct.cursor.clone(),
+                        muted: acct.muted_issues.clone(),
+                        is_initial: acct.cursor.watermark == 0,
+                        min_interval: acct.source().min_interval_secs(),
+                    });
+                }
+                (targets, base, max_failures)
             };
 
-            if account_snapshots.is_empty() {
-                // No active accounts — wait and re-check.
+            if targets.is_empty() {
                 sleep(Duration::from_secs(2)).await;
                 continue;
             }
 
-            // Calculate actual interval with max backoff across all accounts
-            let max_failures = account_snapshots
-                .iter()
-                .map(|(_, _, _, _, f, _, _)| *f)
-                .max()
-                .unwrap_or(0);
-            let actual_interval = if max_failures > 0 {
-                let backoff = interval_secs * 2u64.pow(max_failures.min(5));
-                backoff.min(300)
-            } else {
-                interval_secs
-            };
+            // Respect the slowest provider's floor — Nifty asks for 60s because
+            // its fan-out is heavier than YouTrack's single call.
+            let provider_floor = targets.iter().map(|t| t.min_interval).max().unwrap_or(0);
+            let mut actual = interval_secs.max(provider_floor);
+            if max_failures > 0 {
+                actual = (actual * 2u64.pow(max_failures.min(5))).min(300);
+            }
 
-            sleep(Duration::from_secs(actual_interval)).await;
+            sleep(Duration::from_secs(actual)).await;
 
-            // Re-check that manager still has running accounts after sleep
             {
                 let mgr = state.read().await;
                 if mgr.accounts.values().all(|a| !a.running) {
@@ -178,148 +230,51 @@ pub fn start_polling_loop(
                 }
             }
 
-            // Poll each account
-            for (account_id, url, token, watermark, _consecutive_failures, current_user_id, muted_issues) in &account_snapshots {
-                let client = YouTrackClient::new(url, token);
+            for target in targets {
+                match target.source.fetch(&target.cursor, CALL_BUDGET).await {
+                    Ok(result) => {
+                        let outcome = apply_events(&state, &target, result).await;
+                        let Some(outcome) = outcome else { continue };
 
-                let is_initial_load = *watermark == 0;
-                let start = if *watermark > 0 {
-                    watermark + 1
-                } else {
-                    let now = chrono::Utc::now().timestamp_millis();
-                    now - INITIAL_WINDOW_MS
-                };
-
-                match client.get_activities(start, ACTIVITIES_PER_PAGE).await {
-                    Ok(new_activities) => {
-                        let mut mgr = state.write().await;
-                        let Some(acct) = mgr.accounts.get_mut(account_id) else {
-                            continue;
-                        };
-                        acct.consecutive_failures = 0;
-
-                        let mut new_count = 0u32;
-                        let mut non_muted_new_count = 0u32;
-                        // Collect activities where the current user was just assigned,
-                        // so we can fire targeted notifications after releasing the lock.
-                        let mut assigned_to_me: Vec<(String, Option<String>)> = Vec::new();
-
-                        for mut activity in new_activities {
-                            // Stamp the account ID
-                            activity.account_id = account_id.clone();
-
-                            // Skip current user's own activities
-                            if !current_user_id.is_empty() {
-                                if let Some(ref author) = activity.author {
-                                    if author.id == *current_user_id {
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            // Deduplication
-                            if acct.seen_ids.contains(&activity.id) {
-                                continue;
-                            }
-
-                            // Update watermark
-                            if activity.timestamp > acct.watermark {
-                                acct.watermark = activity.timestamp;
-                            }
-
-                            // Check if this activity's issue is muted
-                            let is_muted = resolve_issue_id_readable(&activity)
-                                .map(|id| muted_issues.contains(&id))
-                                .unwrap_or(false);
-
-                            // Capture assignee-to-me targets (skip muted issues)
-                            if !is_muted
-                                && !current_user_id.is_empty()
-                                && is_assignment_to_user(&activity, current_user_id)
-                            {
-                                if let Some(issue_id) = resolve_issue_id_readable(&activity) {
-                                    let summary = activity
-                                        .target
-                                        .as_ref()
-                                        .and_then(|t| t.summary.clone().or_else(|| {
-                                            t.issue.as_ref().and_then(|i| i.summary.clone())
-                                        }));
-                                    assigned_to_me.push((issue_id, summary));
-                                }
-                            }
-
-                            acct.seen_ids.insert(activity.id.clone());
-                            acct.activities.insert(0, activity);
-                            new_count += 1;
-                            if !is_muted {
-                                non_muted_new_count += 1;
-                            }
-                        }
-
-                        // Prune old activities (keep last 500 per account)
-                        if acct.activities.len() > 500 {
-                            let removed: Vec<_> = acct.activities.drain(500..).collect();
-                            for r in &removed {
-                                acct.seen_ids.remove(&r.id);
-                            }
-                        }
-
-                        // Read IDs are age-pruned (30-day TTL) durably on the
-                        // frontend, which is the source of truth across restarts.
-                        // The backend set is rehydrated from there, so no
-                        // in-memory pruning is needed here.
-
-                        drop(mgr);
-
-                        // Emit event with account context
                         let _ = app_handle.emit(
                             "activities-updated",
                             serde_json::json!({
-                                "accountId": account_id,
-                                "count": new_count,
+                                "accountId": target.account_id,
+                                "count": outcome.new_count,
                             }),
                         );
 
-                        // Send OS notification only for non-muted new activities
-                        if non_muted_new_count > 0 && !is_initial_load {
-                            send_activity_batch_notification(&app_handle, non_muted_new_count);
-                        }
-
-                        // Fire a separate, targeted notification for each assignee-to-me event.
-                        if !is_initial_load {
-                            for (issue_id, summary) in assigned_to_me {
-                                let body = match summary {
-                                    Some(s) if !s.is_empty() => format!("{} — {}", issue_id, s),
-                                    _ => issue_id,
+                        if !target.is_initial {
+                            if outcome.notifiable_count > 0 {
+                                send_batch_notification(&app_handle, outcome.notifiable_count);
+                            }
+                            for (display_id, title) in outcome.assigned_to_me {
+                                let body = match title {
+                                    Some(t) if !t.is_empty() => format!("{} — {}", display_id, t),
+                                    _ => display_id,
                                 };
                                 send_titled_notification(&app_handle, "Assigned to you", &body);
                             }
                         }
                     }
                     Err(e) => {
-                        let err_msg = e.to_string();
-                        let mut mgr = state.write().await;
-                        if let Some(acct) = mgr.accounts.get_mut(account_id) {
-                            acct.consecutive_failures += 1;
-                        }
-
-                        if err_msg.starts_with("RATE_LIMITED:") {
-                            if let Some(secs_str) = err_msg.strip_prefix("RATE_LIMITED:") {
-                                if let Ok(secs) = secs_str.parse::<u64>() {
-                                    drop(mgr);
-                                    sleep(Duration::from_secs(secs)).await;
-                                    continue;
-                                }
+                        {
+                            let mut mgr = state.write().await;
+                            if let Some(acct) = mgr.accounts.get_mut(&target.account_id) {
+                                acct.consecutive_failures += 1;
                             }
                         }
 
-                        drop(mgr);
+                        if let ProviderError::RateLimited(secs) = e {
+                            sleep(Duration::from_secs(secs)).await;
+                            continue;
+                        }
 
                         let _ = app_handle.emit(
                             "poll-error",
                             serde_json::json!({
-                                "accountId": account_id,
-                                "error": err_msg,
+                                "accountId": target.account_id,
+                                "error": e.to_string(),
                             }),
                         );
                     }
@@ -329,24 +284,91 @@ pub fn start_polling_loop(
     });
 }
 
-/// Resolve the readable issue ID for an activity (e.g. "PROJ-123").
-fn resolve_issue_id_readable(activity: &ActivityItem) -> Option<String> {
-    let t = activity.target.as_ref()?;
-    if let Some(ref id_readable) = t.id_readable {
-        let target_type = t.target_type.as_deref().unwrap_or("");
-        if target_type != "IssueComment"
-            && target_type != "ArticleComment"
-            && target_type != "Article"
-        {
-            return Some(id_readable.clone());
+struct ApplyOutcome {
+    new_count: u32,
+    notifiable_count: u32,
+    assigned_to_me: Vec<(String, Option<String>)>,
+}
+
+/// Merge a fetch result into account state under a single write lock.
+async fn apply_events(
+    state: &SharedPollingState,
+    target: &PollTarget,
+    result: crate::provider::FetchResult,
+) -> Option<ApplyOutcome> {
+    let mut mgr = state.write().await;
+    let acct = mgr.accounts.get_mut(&target.account_id)?;
+
+    acct.consecutive_failures = 0;
+    // The provider owns cursor semantics; the engine only persists it.
+    acct.cursor = result.cursor;
+
+    let mut new_count = 0u32;
+    let mut notifiable_count = 0u32;
+    let mut assigned_to_me = Vec::new();
+
+    for mut event in result.events {
+        event.account_id = target.account_id.clone();
+
+        if acct.seen_ids.contains(&event.id) {
+            continue;
+        }
+
+        let is_muted = !event.subject.display_id.is_empty()
+            && target.muted.contains(&event.subject.display_id);
+
+        if !is_muted && is_for_me(&event, &acct.current_user_id) {
+            assigned_to_me.push((
+                event.subject.display_id.clone(),
+                event.subject.title.clone(),
+            ));
+        }
+
+        acct.seen_ids.insert(event.id.clone());
+        acct.events.insert(0, event);
+        new_count += 1;
+        if !is_muted {
+            notifiable_count += 1;
         }
     }
-    if let Some(ref issue) = t.issue {
-        if let Some(ref id_readable) = issue.id_readable {
-            return Some(id_readable.clone());
+
+    if acct.events.len() > MAX_EVENTS {
+        let removed: Vec<_> = acct.events.drain(MAX_EVENTS..).collect();
+        for r in &removed {
+            acct.seen_ids.remove(&r.id);
         }
     }
-    None
+
+    Some(ApplyOutcome {
+        new_count,
+        notifiable_count,
+        assigned_to_me,
+    })
+}
+
+/// True when an event directly targets the current user — an assignment to them,
+/// or an @-mention. Both warrant a distinct notification from the batch.
+fn is_for_me(event: &NormalizedEvent, current_user_id: &str) -> bool {
+    if current_user_id.is_empty() {
+        return false;
+    }
+    if event.mentions_me {
+        return true;
+    }
+    if event.kind != EventKind::Assignment {
+        return false;
+    }
+
+    // YouTrack encodes the new assignee in `added`; Nifty sets `mentions_me`
+    // upstream, so this only needs to handle the YouTrack shape.
+    fn matches(v: &serde_json::Value, uid: &str) -> bool {
+        v.get("id").and_then(|x| x.as_str()) == Some(uid)
+    }
+    match event.raw.get("added") {
+        Some(serde_json::Value::Array(arr)) => arr.iter().any(|e| matches(e, current_user_id)),
+        Some(v @ serde_json::Value::Object(_)) => matches(v, current_user_id),
+        _ => false,
+    }
 }
 
 /// Fire an OS notification with an explicit title + body.
@@ -360,45 +382,131 @@ fn send_titled_notification(app_handle: &AppHandle, title: &str, body: &str) {
         .show();
 }
 
-/// Batched "N new activities" notification.
-fn send_activity_batch_notification(app_handle: &AppHandle, count: u32) {
-    let body = if count > 3 {
-        format!("{} new activities in YouTrack", count)
-    } else {
-        format!(
-            "{} new activit{} in YouTrack",
-            count,
-            if count == 1 { "y" } else { "ies" }
-        )
-    };
+/// Batched "N new notifications" alert.
+fn send_batch_notification(app_handle: &AppHandle, count: u32) {
+    let body = format!(
+        "{} new notification{}",
+        count,
+        if count == 1 { "" } else { "s" }
+    );
     send_titled_notification(app_handle, "YouTrackd", &body);
 }
 
-/// Returns true if this activity is a CustomField/Assignee change where the
-/// `added` array contains the given user (matched by `id`).
-fn is_assignment_to_user(activity: &ActivityItem, current_user_id: &str) -> bool {
-    if current_user_id.is_empty() {
-        return false;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{EventSubject, NormalizedEvent};
+
+    fn event(kind: EventKind, mentions_me: bool, added: serde_json::Value) -> NormalizedEvent {
+        NormalizedEvent {
+            id: "e1".into(),
+            provider: ProviderKind::YouTrack,
+            timestamp: 1,
+            kind,
+            actor: None,
+            subject: EventSubject {
+                id: "t1".into(),
+                display_id: "P-1".into(),
+                title: None,
+                project_id: None,
+                project_name: None,
+            },
+            text: None,
+            mentions_me,
+            seen_remotely: None,
+            url: None,
+            account_id: String::new(),
+            raw: serde_json::json!({ "added": added }),
+        }
     }
-    let Some(ref category) = activity.category else { return false };
-    if category.id != "CustomFieldCategory" {
-        return false;
+
+    #[test]
+    fn mention_is_for_me_regardless_of_kind() {
+        let e = event(EventKind::Comment, true, serde_json::Value::Null);
+        assert!(is_for_me(&e, "u1"));
     }
-    let Some(ref field) = activity.field else { return false };
-    if field.name.as_deref() != Some("Assignee") {
-        return false;
+
+    #[test]
+    fn assignment_to_me_matches_youtrack_added_array() {
+        let e = event(
+            EventKind::Assignment,
+            false,
+            serde_json::json!([{ "id": "u1" }]),
+        );
+        assert!(is_for_me(&e, "u1"));
+        assert!(!is_for_me(&e, "u2"));
     }
-    // `added` may be an array of user objects or a single object.
-    fn entry_matches(entry: &serde_json::Value, user_id: &str) -> bool {
-        entry
-            .get("id")
-            .and_then(|v| v.as_str())
-            .map(|id| id == user_id)
-            .unwrap_or(false)
+
+    #[test]
+    fn assignment_to_someone_else_is_not_for_me() {
+        let e = event(
+            EventKind::Assignment,
+            false,
+            serde_json::json!([{ "id": "other" }]),
+        );
+        assert!(!is_for_me(&e, "u1"));
     }
-    match &activity.added {
-        serde_json::Value::Array(arr) => arr.iter().any(|e| entry_matches(e, current_user_id)),
-        v @ serde_json::Value::Object(_) => entry_matches(v, current_user_id),
-        _ => false,
+
+    #[test]
+    fn empty_user_id_never_matches() {
+        let e = event(EventKind::Assignment, true, serde_json::json!([{"id": ""}]));
+        assert!(!is_for_me(&e, ""));
+    }
+
+    #[test]
+    fn remote_seen_state_overrides_local_read_set() {
+        let mut mgr = PollingManager::new();
+        let mut acct = AccountPollingState::with_provider(
+            ProviderKind::Nifty,
+            String::new(),
+            "t".into(),
+            "u1".into(),
+        );
+
+        // Seen remotely => read, even though it is absent from read_ids.
+        let mut seen = event(EventKind::Comment, false, serde_json::Value::Null);
+        seen.id = "seen".into();
+        seen.seen_remotely = Some(true);
+
+        let mut unseen = event(EventKind::Comment, false, serde_json::Value::Null);
+        unseen.id = "unseen".into();
+        unseen.seen_remotely = Some(false);
+
+        acct.events = vec![seen, unseen];
+        mgr.accounts.insert("a".into(), acct);
+
+        assert_eq!(mgr.total_unread_count(), 1);
+    }
+
+    #[test]
+    fn local_read_set_used_when_provider_has_no_remote_state() {
+        let mut mgr = PollingManager::new();
+        let mut acct = AccountPollingState::new("u".into(), "t".into(), "u1".into());
+        let mut a = event(EventKind::Comment, false, serde_json::Value::Null);
+        a.id = "a".into();
+        let mut b = event(EventKind::Comment, false, serde_json::Value::Null);
+        b.id = "b".into();
+        acct.events = vec![a, b];
+        acct.read_ids.insert("a".into());
+        mgr.accounts.insert("acct".into(), acct);
+
+        assert_eq!(mgr.total_unread_count(), 1);
+    }
+
+    #[test]
+    fn nifty_is_pollable_without_url() {
+        let acct = AccountPollingState::with_provider(
+            ProviderKind::Nifty,
+            String::new(),
+            "token".into(),
+            String::new(),
+        );
+        assert!(acct.is_pollable());
+    }
+
+    #[test]
+    fn youtrack_requires_url() {
+        let acct = AccountPollingState::new(String::new(), "token".into(), String::new());
+        assert!(!acct.is_pollable());
     }
 }

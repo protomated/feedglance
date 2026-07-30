@@ -40,7 +40,7 @@ pub fn setup_tray(app: &AppHandle, state: SharedPollingState) -> tauri::Result<(
                     let mut mgr = state.write().await;
                     for acct in mgr.accounts.values_mut() {
                         let all_ids: Vec<String> =
-                            acct.activities.iter().map(|a| a.id.clone()).collect();
+                            acct.events.iter().map(|a| a.id.clone()).collect();
                         for id in all_ids {
                             acct.read_ids.insert(id);
                         }

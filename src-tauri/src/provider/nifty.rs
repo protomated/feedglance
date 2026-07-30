@@ -353,13 +353,16 @@ impl NiftyProvider {
         let mentions_me = !self.current_user_id.is_empty()
             && msg.tagged.iter().any(|t| t == &self.current_user_id);
 
-        // Nifty tracks read state server-side — unlike YouTrack, where it is
-        // purely local. Surfacing it lets read state sync across devices.
-        let seen_remotely = if self.current_user_id.is_empty() {
-            None
-        } else {
-            Some(msg.seen_by.iter().any(|u| u == &self.current_user_id))
-        };
+        // `seen_by` exists on the payload but is NOT usable as read state:
+        // verified empty across every message in a live workspace, including
+        // ones read in the Nifty UI. There is also no endpoint to mark a
+        // message read, so it could not be written back regardless.
+        //
+        // Reporting `None` keeps read state local, same as YouTrack. Do not
+        // "fix" this by reading `msg.seen_by` without re-verifying that Nifty
+        // actually populates it — a false `Some(true)` silently marks
+        // everything read and the feed goes permanently quiet.
+        let seen_remotely = None;
 
         NormalizedEvent {
             id: format!("nifty:{}", msg.id),
