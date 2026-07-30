@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "../stores/auth";
+import { fetchAssignees, postComment, type AssigneeOption } from "../services/actions";
 import { useNotificationStore } from "../stores/notifications";
 import { showToast } from "./Toast";
-import type { CommandResult, TeamMember } from "../types/youtrack";
+
 
 interface Props {
   issueId: string;
@@ -18,17 +18,16 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const getAccountCredentials = useAuthStore((s) => s.getAccountCredentials);
-  const legacyCredentials = useAuthStore((s) => s.credentials);
-  const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
+  const getActionAccount = useAuthStore((s) => s.getActionAccount);
+  const credentials = getActionAccount(accountId);
   const refresh = useNotificationStore((s) => s.refresh);
   const markRead = useNotificationStore((s) => s.markRead);
 
   // @mention state
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionStart, setMentionStart] = useState(-1);
-  const [members, setMembers] = useState<TeamMember[]>([]);
-  const [filtered, setFiltered] = useState<TeamMember[]>([]);
+  const [members, setMembers] = useState<AssigneeOption[]>([]);
+  const [filtered, setFiltered] = useState<AssigneeOption[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -42,12 +41,7 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
     if (!credentials || !projectId) return;
     setLoadingMembers(true);
     try {
-      const result = await invoke<TeamMember[]>("get_project_team", {
-        url: credentials.url,
-        token: credentials.token,
-        projectId,
-      });
-      setMembers(result);
+      setMembers(await fetchAssignees(credentials, projectId));
     } catch {
       setMembers([]);
     } finally {
@@ -78,7 +72,7 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
     setFiltered([]);
   };
 
-  const insertMention = (member: TeamMember) => {
+  const insertMention = (member: AssigneeOption) => {
     // Replace @query with @login
     const before = text.slice(0, mentionStart);
     const after = text.slice(
@@ -139,12 +133,7 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
 
     setSubmitting(true);
     try {
-      await invoke<CommandResult>("post_comment", {
-        url: credentials.url,
-        token: credentials.token,
-        issueId,
-        text: text.trim(),
-      });
+      await postComment(credentials, issueId, text.trim());
       showToast("success", `Comment posted on ${issueId}`);
       if (activityId && !isRead) {
         await markRead(activityId, accountId);

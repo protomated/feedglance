@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | Feed | global `/activities` | per-task `/messages` (no project-wide) |
 //! | Delta | `timestamp > watermark` server-side | none — client-side diff |
-//! | Read state | local only | server-side `seen_by` |
+//! | Read state | local only | local only (`seen_by` is never populated) |
 //! | Mutations | command API | REST |
 //!
 //! A shared "API client" trait would leak those differences into every caller.
@@ -20,6 +20,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub mod actions;
 pub mod nifty;
 pub mod youtrack_provider;
 

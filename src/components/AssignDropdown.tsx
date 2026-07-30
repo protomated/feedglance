@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "../stores/auth";
 import { useNotificationStore } from "../stores/notifications";
 import { showToast } from "./Toast";
-import type { TeamMember, CommandResult } from "../types/youtrack";
+import { assignItem, fetchAssignees, type AssigneeOption } from "../services/actions";
 
 interface Props {
   issueId: string;
@@ -13,15 +12,14 @@ interface Props {
 }
 
 export function AssignDropdown({ issueId, projectId, accountId, onClose }: Props) {
-  const [members, setMembers] = useState<TeamMember[]>([]);
-  const [filtered, setFiltered] = useState<TeamMember[]>([]);
+  const [members, setMembers] = useState<AssigneeOption[]>([]);
+  const [filtered, setFiltered] = useState<AssigneeOption[]>([]);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const getAccountCredentials = useAuthStore((s) => s.getAccountCredentials);
-  const legacyCredentials = useAuthStore((s) => s.credentials);
-  const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
+  const getActionAccount = useAuthStore((s) => s.getActionAccount);
+  const credentials = getActionAccount(accountId);
   const refresh = useNotificationStore((s) => s.refresh);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -31,11 +29,7 @@ export function AssignDropdown({ issueId, projectId, accountId, onClose }: Props
 
     const fetchTeam = async () => {
       try {
-        const result = await invoke<TeamMember[]>("get_project_team", {
-          url: credentials.url,
-          token: credentials.token,
-          projectId,
-        });
+        const result = await fetchAssignees(credentials, projectId);
         setMembers(result);
         setFiltered(result);
       } catch (e) {
@@ -84,17 +78,12 @@ export function AssignDropdown({ issueId, projectId, accountId, onClose }: Props
     };
   }, [onClose]);
 
-  const handleSelect = async (member: TeamMember) => {
+  const handleSelect = async (member: AssigneeOption) => {
     if (!credentials || executing) return;
 
     setExecuting(true);
     try {
-      await invoke<CommandResult>("execute_command", {
-        url: credentials.url,
-        token: credentials.token,
-        issueId,
-        command: `for ${member.login}`,
-      });
+      await assignItem(credentials, issueId, member.id);
       showToast("success", `${issueId} assigned to ${member.name}`);
       onClose();
       await refresh();

@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { useAuthStore } from "../stores/auth";
 import { useNotificationStore } from "../stores/notifications";
 import { showToast } from "./Toast";
-import type { StateBundleElement, CommandResult } from "../types/youtrack";
+import { fetchStatuses, setStatus, type StatusOption } from "../services/actions";
 
 interface Props {
   issueId: string;
@@ -13,13 +12,12 @@ interface Props {
 }
 
 export function StatusDropdown({ issueId, projectId, accountId, onClose }: Props) {
-  const [states, setStates] = useState<StateBundleElement[]>([]);
+  const [states, setStates] = useState<StatusOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const getAccountCredentials = useAuthStore((s) => s.getAccountCredentials);
-  const legacyCredentials = useAuthStore((s) => s.credentials);
-  const credentials = accountId ? getAccountCredentials(accountId) : legacyCredentials;
+  const getActionAccount = useAuthStore((s) => s.getActionAccount);
+  const credentials = getActionAccount(accountId);
   const refresh = useNotificationStore((s) => s.refresh);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -28,12 +26,7 @@ export function StatusDropdown({ issueId, projectId, accountId, onClose }: Props
 
     const fetchStates = async () => {
       try {
-        const result = await invoke<StateBundleElement[]>("get_project_states", {
-          url: credentials.url,
-          token: credentials.token,
-          projectId,
-        });
-        setStates(result);
+        setStates(await fetchStatuses(credentials, projectId));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -65,17 +58,12 @@ export function StatusDropdown({ issueId, projectId, accountId, onClose }: Props
     };
   }, [onClose]);
 
-  const handleSelect = async (state: StateBundleElement) => {
+  const handleSelect = async (state: StatusOption) => {
     if (!credentials || executing) return;
 
     setExecuting(true);
     try {
-      await invoke<CommandResult>("execute_command", {
-        url: credentials.url,
-        token: credentials.token,
-        issueId,
-        command: `State ${state.name}`,
-      });
+      await setStatus(credentials, issueId, state.id);
       showToast("success", `${issueId} → ${state.name}`);
       onClose();
       await refresh();
