@@ -1,6 +1,7 @@
 mod activities;
 mod cache;
 mod polling;
+mod provider;
 mod tray;
 mod youtrack;
 
