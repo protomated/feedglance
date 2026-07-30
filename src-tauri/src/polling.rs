@@ -252,7 +252,11 @@ pub fn start_polling_loop(app_handle: AppHandle, state: SharedPollingState, _can
 
                         if !target.is_initial {
                             if outcome.notifiable_count > 0 {
-                                send_batch_notification(&app_handle, outcome.notifiable_count);
+                                send_batch_notification(
+                                    &app_handle,
+                                    outcome.notifiable_count,
+                                    target.source.kind(),
+                                );
                             }
                             for (display_id, title) in outcome.assigned_to_me {
                                 let body = match title {
@@ -389,11 +393,19 @@ fn send_titled_notification(app_handle: &AppHandle, title: &str, body: &str) {
 }
 
 /// Batched "N new notifications" alert.
-fn send_batch_notification(app_handle: &AppHandle, count: u32) {
+///
+/// Names the provider rather than the app: with several accounts connected, a
+/// generic title does not say which service the notifications came from.
+fn send_batch_notification(app_handle: &AppHandle, count: u32, provider: ProviderKind) {
+    let name = match provider {
+        ProviderKind::YouTrack => "YouTrack",
+        ProviderKind::Nifty => "Nifty",
+    };
     let body = format!(
-        "{} new notification{}",
+        "{} new notification{} in {}",
         count,
-        if count == 1 { "" } else { "s" }
+        if count == 1 { "" } else { "s" },
+        name
     );
     send_titled_notification(app_handle, "YouTrackd", &body);
 }

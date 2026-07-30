@@ -42,20 +42,50 @@ export function labelFromUrl(url: string): string {
 }
 
 /**
- * Display label for an account.
+ * Default display label for an account.
  *
- * Falls back through host, then the user's own name, then the provider name —
- * a Nifty account with no workspace URL still needs something to show.
+ * Deriving this from the host only works when the host encodes the workspace,
+ * which is true for YouTrack (`myteam.youtrack.cloud`) and for Nifty's default
+ * form (`myteam.nifty.pm`). It is NOT true for a Nifty CNAME custom domain:
+ * `portal.protomated.com` yields "portal", which names the subdomain rather
+ * than the workspace and is meaningless to the user.
+ *
+ * So the host is used only when it matches a known workspace-encoding pattern.
+ * Otherwise we prefer the account owner's name, then the registrable domain,
+ * then the provider name. Users can override any of this via renameAccount.
  */
 export function labelForAccount(
   url: string,
   provider: ProviderKind | undefined,
   userName?: string,
 ): string {
+  const providerName = provider === "nifty" ? "Nifty" : "YouTrack";
+
   if (url) {
-    const fromUrl = labelFromUrl(url);
-    if (fromUrl) return fromUrl;
+    let hostname = "";
+    try {
+      hostname = new URL(url).hostname;
+    } catch {
+      hostname = "";
+    }
+
+    if (hostname) {
+      // Workspace-encoding hosts: the first segment IS the workspace name.
+      if (/\.youtrack\.cloud$/i.test(hostname) || /\.nifty\.pm$/i.test(hostname)) {
+        const first = hostname.split(".")[0];
+        if (first) return first;
+      }
+
+      // Custom domain — the subdomain is not the workspace name. Prefer the
+      // person's name, else fall back to the registrable domain
+      // ("protomated.com" reads better than "portal").
+      if (userName) return userName;
+      const parts = hostname.split(".").filter(Boolean);
+      if (parts.length >= 2) return parts.slice(-2).join(".");
+      return hostname;
+    }
   }
+
   if (userName) return userName;
-  return provider === "nifty" ? "Nifty" : "YouTrack";
+  return providerName;
 }

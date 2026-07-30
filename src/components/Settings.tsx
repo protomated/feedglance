@@ -55,6 +55,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
   const removeAccount = useAuthStore((s) => s.removeAccount);
   const updateToken = useAuthStore((s) => s.updateToken);
   const addAccount = useAuthStore((s) => s.addAccount);
+  const renameAccount = useAuthStore((s) => s.renameAccount);
   const checkHealth = useAuthStore((s) => s.checkHealth);
   const disconnect = useAuthStore((s) => s.disconnect);
 
@@ -259,6 +260,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
               onRemove={() => removeAccount(account.id)}
               onUpdateToken={(token) => updateToken(account.id, token)}
               onTestConnection={() => checkHealth(account.id)}
+              onRename={(label) => renameAccount(account.id, label)}
             />
           ))}
         </div>
@@ -347,7 +349,8 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
             )}
           </div>
           <p className="text-xs text-gray-400">
-            YouTrack Cloud notifications in your system tray.
+            Project notifications in your system tray, for{" "}
+            {PROVIDER_LIST.map((p) => p.name).join(" and ")}.
           </p>
           <p className="text-xs text-gray-400">
             by{" "}
@@ -453,9 +456,10 @@ interface AccountCardProps {
   onRemove: () => void;
   onUpdateToken: (token: string) => Promise<void>;
   onTestConnection: () => Promise<boolean>;
+  onRename: (label: string) => Promise<void>;
 }
 
-function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnection }: AccountCardProps) {
+function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnection, onRename }: AccountCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"success" | "fail" | null>(null);
@@ -463,6 +467,8 @@ function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnectio
   const [newToken, setNewToken] = useState("");
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [showRename, setShowRename] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
 
   const statusColor = status === "connected" ? "bg-green-500" : status === "error" ? "bg-red-500" : "bg-yellow-400";
 
@@ -472,6 +478,12 @@ function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnectio
     const ok = await onTestConnection();
     setTestResult(ok ? "success" : "fail");
     setTesting(false);
+  };
+
+  const handleRename = async (e: FormEvent) => {
+    e.preventDefault();
+    await onRename(renameValue);
+    setShowRename(false);
   };
 
   const handleUpdateToken = async (e: FormEvent) => {
@@ -505,12 +517,15 @@ function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnectio
         )}
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
-            {account.user?.fullName || account.label}
+            {/* A user-chosen name wins over the account owner's name. */}
+            {account.label || account.user?.fullName || providerOf(account.provider).name}
           </p>
           <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-            {/* Nifty's workspace URL is optional, so fall back to the provider
-                name rather than rendering an empty line. */}
-            {account.url || providerOf(account.provider).name}
+            {/* Always name the provider — with several connected, the host alone
+                does not say which service a row belongs to. Nifty's workspace
+                URL is optional, so it may be the only thing available. */}
+            {providerOf(account.provider).name}
+            {account.url ? ` · ${account.url.replace(/^https?:\/\//, "")}` : ""}
           </p>
         </div>
         <span className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${statusColor}`} />
@@ -527,6 +542,38 @@ function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnectio
             {testResult === "success" && <span className="ml-2 text-green-500">OK</span>}
             {testResult === "fail" && <span className="ml-2 text-red-500">Failed</span>}
           </button>
+
+          <button
+            onClick={() => {
+              setShowRename(!showRename);
+              setRenameValue(account.label ?? "");
+            }}
+            className="w-full text-left px-2 py-1 rounded text-xs text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+          >
+            Rename
+          </button>
+
+          {showRename && (
+            <form onSubmit={handleRename} className="px-2 py-1 space-y-1.5">
+              <input
+                type="text"
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                placeholder="Account name"
+                autoFocus
+                className="w-full px-2 py-1.5 rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <p className="text-[11px] text-gray-400">
+                Leave blank to restore the default name.
+              </p>
+              <button
+                type="submit"
+                className="w-full py-1 px-2 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs transition-colors"
+              >
+                Save name
+              </button>
+            </form>
+          )}
 
           <button
             onClick={() => setShowUpdateToken(!showUpdateToken)}
