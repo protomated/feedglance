@@ -382,6 +382,29 @@ async fn get_project_team(
     cache::fetch_project_team(&project_cache, &client, &project_id).await
 }
 
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+
+    #[test]
+    fn provider_tag_defaults_to_youtrack() {
+        // Accounts saved before multi-provider support send no tag.
+        assert_eq!(parse_provider(None).unwrap(), ProviderKind::YouTrack);
+        assert_eq!(parse_provider(Some(String::new())).unwrap(), ProviderKind::YouTrack);
+    }
+
+    #[test]
+    fn provider_tag_parses_known_providers() {
+        assert_eq!(parse_provider(Some("youtrack".into())).unwrap(), ProviderKind::YouTrack);
+        assert_eq!(parse_provider(Some("nifty".into())).unwrap(), ProviderKind::Nifty);
+    }
+
+    #[test]
+    fn unknown_provider_is_rejected_not_silently_defaulted() {
+        assert!(parse_provider(Some("jira".into())).is_err());
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let polling_state: SharedPollingState = Arc::new(RwLock::new(PollingManager::new()));

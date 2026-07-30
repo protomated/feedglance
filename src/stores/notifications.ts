@@ -310,6 +310,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       url: account.url,
       token: account.token,
       currentUserId: account.user?.id,
+      provider: account.provider ?? "youtrack",
     });
   },
 

@@ -1,13 +1,36 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
-import type { Account, UserInfo } from "../types/youtrack";
+import type { Account, ProviderKind, UserInfo } from "../types/youtrack";
 import {
   getAccounts,
   saveAccount,
   removeAccount as removeAccountFromStore,
   saveAllAccounts,
 } from "../services/credentials";
-import { generateAccountId, labelFromUrl } from "../utils/account";
+import { generateAccountId, labelForAccount } from "../utils/account";
+
+/**
+ * Validate credentials for any provider and return normalized user info.
+ *
+ * YouTrack returns a full profile; Nifty's provider-agnostic `validate_provider`
+ * returns only a user ID, so the remaining fields are filled from what we have.
+ * Both paths must produce a `UserInfo` because the whole UI renders one.
+ */
+async function validateAccount(
+  provider: ProviderKind,
+  url: string,
+  token: string,
+): Promise<UserInfo> {
+  if (provider === "youtrack") {
+    return invoke<UserInfo>("validate_connection", { url, token });
+  }
+  const id = await invoke<string>("validate_provider", {
+    provider,
+    url,
+    token,
+  });
+  return { id, login: id, fullName: "", email: "", avatarUrl: "" };
+}
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -33,12 +56,12 @@ interface AuthState {
 
   // Actions
   initialize: () => Promise<void>;
-  addAccount: (url: string, token: string) => Promise<Account>;
+  addAccount: (url: string, token: string, provider?: ProviderKind) => Promise<Account>;
   removeAccount: (accountId: string) => Promise<void>;
   updateToken: (accountId: string, newToken: string) => Promise<void>;
   checkHealth: (accountId?: string) => Promise<boolean>;
   /** @deprecated Use addAccount. Kept for Onboarding backward compat during transition. */
-  connect: (url: string, token: string) => Promise<UserInfo>;
+  connect: (url: string, token: string, provider?: ProviderKind) => Promise<UserInfo>;
   /** @deprecated Use removeAccount for each. Clears all accounts. */
   disconnect: () => Promise<void>;
 
@@ -86,33 +109,35 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const newErrors: Record<string, string | null> = {};
 
     for (const raw of rawAccounts) {
+      // Accounts saved before multi-provider support have no tag; they are all
+      // YouTrack.
+      const provider: ProviderKind = raw.provider ?? "youtrack";
+      const id =
+        raw.id || (await generateAccountId(raw.url, provider, raw.token));
       try {
-        const user = await invoke<UserInfo>("validate_connection", {
-          url: raw.url,
-          token: raw.token,
-        });
-        const id = raw.id || (await generateAccountId(raw.url));
-        const account: Account = {
+        const user = await validateAccount(provider, raw.url, raw.token);
+        validAccounts.push({
           id,
           url: raw.url,
           token: raw.token,
           user,
-          label: raw.label || labelFromUrl(raw.url),
-        };
-        validAccounts.push(account);
+          provider,
+          label:
+            raw.label || labelForAccount(raw.url, provider, user.fullName || user.login),
+        });
         newStatuses[id] = "connected";
         newErrors[id] = null;
       } catch (e) {
-        const id = raw.id || (await generateAccountId(raw.url));
-        // Keep the account even if validation fails
-        const account: Account = {
+        // Keep the account even if validation fails — the user may be offline,
+        // and dropping it would silently lose their configuration.
+        validAccounts.push({
           id,
           url: raw.url,
           token: raw.token,
           user: raw.user,
-          label: raw.label || labelFromUrl(raw.url),
-        };
-        validAccounts.push(account);
+          provider,
+          label: raw.label || labelForAccount(raw.url, provider, raw.user?.fullName),
+        });
         newStatuses[id] = "error";
         newErrors[id] = e instanceof Error ? e.message : String(e);
       }
@@ -136,26 +161,31 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     });
   },
 
-  addAccount: async (url: string, token: string) => {
+  addAccount: async (url: string, token: string, provider: ProviderKind = "youtrack") => {
     const statuses = { ...get().connectionStatuses };
-    const id = await generateAccountId(url);
+    const id = await generateAccountId(url, provider, token);
 
     // Check for duplicate
     if (get().accounts.some((a) => a.id === id)) {
-      throw new Error("This YouTrack instance is already connected.");
+      throw new Error(
+        provider === "nifty"
+          ? "This Nifty workspace is already connected."
+          : "This YouTrack instance is already connected.",
+      );
     }
 
     statuses[id] = "connecting";
     set({ connectionStatuses: statuses });
 
-    const user = await invoke<UserInfo>("validate_connection", { url, token });
+    const user = await validateAccount(provider, url, token);
 
     const account: Account = {
       id,
       url,
       token,
       user,
-      label: labelFromUrl(url),
+      provider,
+      label: labelForAccount(url, provider, user.fullName || user.login),
     };
 
     await saveAccount(account);
@@ -208,10 +238,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const account = get().accounts.find((a) => a.id === accountId);
     if (!account) throw new Error("Account not found");
 
-    const user = await invoke<UserInfo>("validate_connection", {
-      url: account.url,
-      token: newToken,
-    });
+    const user = await validateAccount(
+      account.provider ?? "youtrack",
+      account.url,
+      newToken,
+    );
 
     const updated: Account = { ...account, token: newToken, user };
     await saveAccount(updated);
@@ -247,10 +278,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
     for (const account of toCheck) {
       try {
-        const ok = await invoke<boolean>("check_connection", {
-          url: account.url,
-          token: account.token,
-        });
+        // `check_connection` is YouTrack-only; other providers validate through
+        // the shared provider path.
+        let ok: boolean;
+        if ((account.provider ?? "youtrack") === "youtrack") {
+          ok = await invoke<boolean>("check_connection", {
+            url: account.url,
+            token: account.token,
+          });
+        } else {
+          ok = await validateAccount(account.provider!, account.url, account.token)
+            .then(() => true)
+            .catch(() => false);
+        }
         if (ok) {
           newStatuses[account.id] = "connected";
           newErrors[account.id] = null;
@@ -282,8 +322,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   // Backward-compat shim: delegates to addAccount
-  connect: async (url: string, token: string) => {
-    const account = await get().addAccount(url, token);
+  connect: async (url: string, token: string, provider: ProviderKind = "youtrack") => {
+    const account = await get().addAccount(url, token, provider);
     return account.user;
   },
 
