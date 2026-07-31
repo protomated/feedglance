@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { load } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
 import type { ActivityCategoryId } from "../types/activity";
+import { migrateLegacyProjectKeys } from "../utils/projectFilter";
 
 const STORE_NAME = "filters.json";
 const KEY_PROJECTS = "selected_projects";
@@ -32,6 +33,13 @@ interface FilterState {
   /** Load persisted filters from store. */
   initialize: () => Promise<void>;
   /** Toggle a project filter chip. */
+  /**
+   * Upgrade legacy unscoped project keys to account-scoped ones.
+   *
+   * Runs once activities are loaded, since binding a bare key to its account
+   * requires knowing which account actually has a project by that name.
+   */
+  migrateProjectKeys: (knownKeysByAccount: Map<string, Set<string>>) => void;
   toggleProject: (projectKey: string) => void;
   /** Toggle a category type filter. */
   toggleType: (typeId: ActivityCategoryId) => void;
@@ -108,6 +116,8 @@ export const useFilterStore = create<FilterState>((set, get) => ({
       const assignedToMeOnly = await store.get<boolean>(KEY_ASSIGNED_ONLY);
       const mutedSet = new Set(muted ?? []);
       set({
+        // Stored keys may still be legacy unscoped ones; `migrateProjectKeys`
+        // upgrades them once activities are loaded and accounts are known.
         selectedProjects: new Set(projects ?? []),
         selectedTypes: new Set((types ?? []) as ActivityCategoryId[]),
         mutedIssues: mutedSet,
@@ -119,6 +129,22 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     } catch {
       // First run — no stored filters
     }
+  },
+
+  migrateProjectKeys: (knownKeysByAccount: Map<string, Set<string>>) => {
+    const s = get();
+    if (s.selectedProjects.size === 0) return;
+    const next = migrateLegacyProjectKeys(Array.from(s.selectedProjects), knownKeysByAccount);
+    // Same membership means nothing to migrate — avoid a pointless write and
+    // the re-render it would cause on every activity update.
+    if (
+      next.size === s.selectedProjects.size &&
+      Array.from(next).every((k) => s.selectedProjects.has(k))
+    ) {
+      return;
+    }
+    set({ selectedProjects: next });
+    persist(next, s.selectedTypes, s.mutedIssues, s.selectedAccounts, s.viewMode, s.assignedToMeOnly);
   },
 
   toggleProject: (projectKey: string) => {

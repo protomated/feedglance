@@ -21,7 +21,14 @@ const INTERVAL_IDLE: u64 = 120;
 /// YouTrack ignores this (one call per cycle). Nifty uses it to bound fan-out:
 /// its 200 GET/min limit is team-scoped, so it is shared by every user running
 /// this app in the same workspace. Staying well under lets N clients coexist.
-const CALL_BUDGET: u32 = 40;
+///
+/// 40 was too low to complete a first sweep of a real workspace: 8 projects /
+/// ~280 tasks needs ~290 calls, so phase 1 never finished, fingerprints stayed
+/// incomplete, and the cheap steady state was never reached. 100 clears a
+/// cold start in ~3 cycles (3 min at the 60s Nifty floor) while leaving half
+/// the team-shared limit for other clients. Steady state stays near-zero
+/// message calls, so this ceiling is only reached while catching up.
+const CALL_BUDGET: u32 = 100;
 
 /// Max events retained per account before pruning.
 const MAX_EVENTS: usize = 500;
