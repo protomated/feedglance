@@ -111,7 +111,46 @@ impl YouTrackClient {
             return Err(format!("YouTrack API error ({}): {}", status, body).into());
         }
 
-        let mut user: UserInfo = resp.json().await?;
+        // A 200 is not proof this host is a YouTrack instance. Any web server
+        // can answer /api/users/me — a Nifty workspace on a CNAME custom domain
+        // serves its SPA shell for every path, so the request "succeeds" and
+        // then fails deep in JSON parsing with an opaque error.
+        //
+        // Check the content type before trusting the body, so a wrong host is
+        // reported as a wrong host rather than as malformed JSON.
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+
+        if !content_type.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json") {
+            return Err(format!(
+                "{} does not look like a YouTrack instance — /api/users/me returned {} instead of JSON. Check the URL, and if this is a different provider, connect it as that provider instead.",
+                self.base_url,
+                if content_type.is_empty() { "no content type" } else { &content_type }
+            )
+            .into());
+        }
+
+        let mut user: UserInfo = resp.json().await.map_err(|e| {
+            format!(
+                "{} returned JSON that is not a YouTrack user profile: {}",
+                self.base_url, e
+            )
+        })?;
+
+        // A JSON API that is not YouTrack can still parse, since every field
+        // except `id` has a default. An empty `id` means we did not actually
+        // reach a YouTrack user endpoint.
+        if user.id.is_empty() {
+            return Err(format!(
+                "{} responded to /api/users/me but returned no user ID — it does not appear to be a YouTrack instance.",
+                self.base_url
+            )
+            .into());
+        }
 
         // YouTrack returns avatarUrl as a relative path — resolve to absolute
         if !user.avatar_url.is_empty() && !user.avatar_url.starts_with("http") {
@@ -397,5 +436,49 @@ impl YouTrackClient {
             .collect();
 
         Ok(members)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact misconfiguration that shipped a confusing error: a Nifty
+    /// workspace on a CNAME custom domain answers /api/users/me with HTTP 200
+    /// and its SPA shell, so a naive `resp.json()` failed with an opaque parse
+    /// error instead of naming the real problem.
+    ///
+    /// Live because the behaviour under test is the *server's* — a mock would
+    /// just assert our own assumption about what that host returns.
+    #[tokio::test]
+    #[ignore]
+    async fn non_youtrack_host_is_rejected_by_name_live() {
+        let client = YouTrackClient::new("https://portal.protomated.com", "irrelevant");
+        let err = client
+            .get_current_user()
+            .await
+            .expect_err("a Nifty SPA host must not validate as YouTrack");
+        let msg = err.to_string();
+        println!("{}", msg);
+        assert!(
+            msg.contains("does not look like a YouTrack instance"),
+            "error should name the wrong-host cause, got: {}",
+            msg
+        );
+    }
+
+    /// A real YouTrack instance must still validate — the content-type guard
+    /// must not reject the happy path.
+    #[tokio::test]
+    #[ignore]
+    async fn real_youtrack_still_validates_live() {
+        let url = std::env::var("YOUTRACK_URL").expect("YOUTRACK_URL not set");
+        let token = std::env::var("YOUTRACK_TOKEN").expect("YOUTRACK_TOKEN not set");
+        let user = YouTrackClient::new(&url, &token)
+            .get_current_user()
+            .await
+            .expect("real YouTrack instance failed to validate");
+        println!("validated as {} ({})", user.login, user.id);
+        assert!(!user.id.is_empty());
     }
 }
