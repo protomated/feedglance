@@ -21,10 +21,10 @@ pub fn setup_tray(app: &AppHandle, state: SharedPollingState) -> tauri::Result<(
     let icon = Image::from_bytes(include_bytes!("../icons/tray-icon@2x.png"))
         .expect("failed to load tray icon");
 
-    TrayIconBuilder::with_id("youtrackd-tray")
+    TrayIconBuilder::with_id("feedglance-tray")
         .icon(icon)
         .icon_as_template(true)
-        .tooltip("YouTrackd")
+        .tooltip("Feedglance")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
@@ -111,7 +111,7 @@ fn show_window(app: &AppHandle) {
 
 /// Update the tray icon badge (title text next to icon) and tooltip with unread count.
 pub fn update_tray_badge(app: &AppHandle, unread_count: u32) {
-    if let Some(tray) = app.tray_by_id("youtrackd-tray") {
+    if let Some(tray) = app.tray_by_id("feedglance-tray") {
         // set_title shows text next to the icon in the macOS menu bar.
         // Use Some("") instead of None to clear the title — on macOS,
         // set_title(None) can be a no-op that leaves the old text visible.
@@ -126,11 +126,11 @@ pub fn update_tray_badge(app: &AppHandle, unread_count: u32) {
 
         // Also update tooltip for hover
         let tooltip = if unread_count == 0 {
-            "YouTrackd".to_string()
+            "Feedglance".to_string()
         } else if unread_count > 99 {
-            "YouTrackd — 99+ unread".to_string()
+            "Feedglance — 99+ unread".to_string()
         } else {
-            format!("YouTrackd — {} unread", unread_count)
+            format!("Feedglance — {} unread", unread_count)
         };
         let _ = tray.set_tooltip(Some(&tooltip));
     }

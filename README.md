@@ -1,10 +1,10 @@
-# YouTrackd
+# Feedglance
 
 Gitify for YouTrack — a lightweight Tauri v2 desktop app that brings YouTrack Cloud notifications to the system tray with quick actions.
 
 ## Download
 
-Grab the latest release from the [Releases page](https://github.com/protomated/youtrackd/releases).
+Grab the latest release from the [Releases page](https://github.com/protomated/feedglance/releases).
 
 | Platform | File |
 |----------|------|
@@ -30,7 +30,7 @@ This app is not code-signed. Your OS will block it by default. Follow the instru
 **Option B — Remove the quarantine attribute:**
 
 ```sh
-xattr -cr /Applications/YouTrackd.app
+xattr -cr /Applications/Feedglance.app
 ```
 
 Then open the app normally.
@@ -39,7 +39,7 @@ Then open the app normally.
 
 1. Try to open the app (it will be blocked)
 2. Go to **System Settings → Privacy & Security**
-3. Scroll down — you'll see a message about YouTrackd being blocked
+3. Scroll down — you'll see a message about Feedglance being blocked
 4. Click **Open Anyway**
 
 ### Windows
@@ -54,14 +54,14 @@ When you see the "Windows protected your PC" SmartScreen dialog:
 AppImage files need to be made executable first:
 
 ```sh
-chmod +x YouTrackd_*.AppImage
-./YouTrackd_*.AppImage
+chmod +x Feedglance_*.AppImage
+./Feedglance_*.AppImage
 ```
 
 For `.deb` packages, install with:
 
 ```sh
-sudo dpkg -i youtrackd_*.deb
+sudo dpkg -i feedglance_*.deb
 ```
 
 ## Development
@@ -109,7 +109,7 @@ Other prefixes (`chore:`, `docs:`, `ci:`, `refactor:`, `test:`) do not trigger a
 2. **Release PR appears automatically** — release-please opens (or updates) a PR titled _"chore(main): release vX.Y.Z"_. This PR bumps versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, and generates `CHANGELOG.md`.
 3. **Merge the Release PR** — when you're ready to cut a release, merge it.
 4. **Builds run automatically** — GitHub Actions builds for macOS (ARM + Intel), Windows, and Linux. This takes roughly 15-20 minutes.
-5. **Review the draft release** — Go to [GitHub Releases](https://github.com/protomated/youtrackd/releases). The workflow creates a **draft** pre-release with all platform artifacts attached. Review, edit notes if needed, then click **Publish release**.
+5. **Review the draft release** — Go to [GitHub Releases](https://github.com/protomated/feedglance/releases). The workflow creates a **draft** pre-release with all platform artifacts attached. Review, edit notes if needed, then click **Publish release**.
 
 ### What gets built
 

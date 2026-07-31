@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    youtrackd_lib::run()
+    feedglance_lib::run()
 }
