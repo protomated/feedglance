@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Feedglance",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "identifier": "com.protomated.feedglance",
   "build": {
     "beforeDevCommand": "pnpm dev",
