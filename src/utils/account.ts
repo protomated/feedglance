@@ -1,4 +1,26 @@
-import type { ProviderKind } from "../types/youtrack";
+import type { Account, ProviderKind } from "../types/youtrack";
+
+/**
+ * Infer the provider for an account saved before multi-provider support.
+ *
+ * Builds prior to the provider picker called `addAccount(url, token)` with no
+ * provider argument, which defaulted to "youtrack". A Nifty account added that
+ * way is persisted as YouTrack and then validated, health-checked and polled
+ * through the YouTrack client — which fails, because Nifty's API is elsewhere.
+ *
+ * The token prefix is the reliable discriminator: Nifty issues `nft_...` and
+ * YouTrack issues `perm:`/`perm-`. Anything else keeps its stored tag, so this
+ * only ever corrects accounts we can positively identify.
+ *
+ * Nifty's `url` is a deep-link origin rather than an API host, so a mis-tagged
+ * account also has its URL reinterpreted rather than dropped.
+ */
+export function inferProvider(account: Pick<Account, "token" | "provider">): ProviderKind {
+  const stored = account.provider;
+  if (stored === "nifty") return "nifty";
+  if (account.token?.startsWith("nft_")) return "nifty";
+  return stored ?? "youtrack";
+}
 
 /**
  * Generate a deterministic account ID.

@@ -7,7 +7,7 @@ import {
   removeAccount as removeAccountFromStore,
   saveAllAccounts,
 } from "../services/credentials";
-import { generateAccountId, labelForAccount } from "../utils/account";
+import { generateAccountId, inferProvider, labelForAccount } from "../utils/account";
 
 /**
  * Validate credentials for any provider and return normalized user info.
@@ -120,11 +120,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const newErrors: Record<string, string | null> = {};
 
     for (const raw of rawAccounts) {
-      // Accounts saved before multi-provider support have no tag; they are all
-      // YouTrack.
-      const provider: ProviderKind = raw.provider ?? "youtrack";
+      // Accounts saved before multi-provider support carry no tag, and ones
+      // added through the pre-picker Settings form carry a wrong one. Infer
+      // from the token rather than trusting the stored value.
+      const provider: ProviderKind = inferProvider(raw);
+      const retagged = provider !== (raw.provider ?? "youtrack");
+      // A corrected provider changes the ID's derivation (Nifty hashes the
+      // token, YouTrack the URL), so the stored ID is stale and must be
+      // regenerated or the account would keep its YouTrack-derived identity.
       const id =
-        raw.id || (await generateAccountId(raw.url, provider, raw.token));
+        retagged || !raw.id
+          ? await generateAccountId(raw.url, provider, raw.token)
+          : raw.id;
       try {
         const user = await validateAccount(provider, raw.url, raw.token);
         validAccounts.push({
