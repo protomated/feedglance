@@ -226,9 +226,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.version.outputs.tag_name }}"
           echo "Publishing release for tag: $TAG"
-          gh api repos/${{ github.repository }}/releases \
-            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1 | \
-            xargs -I{} gh api repos/${{ github.repository }}/releases/{} \
-              --method PATCH -F draft=false -F prerelease=false
+
+          RELEASE_ID="$(gh api repos/${{ github.repository }}/releases --paginate \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .id" | head -1)"
+          if [ -z "$RELEASE_ID" ]; then
+            echo "::error::No release found for tag $TAG"
+            exit 1
+          fi
+
+          # `make_latest` is required, not implied. A draft can never be the
+          # latest release, so clearing the draft flag alone leaves GitHub's
+          # latest pointer on whatever it was before — which is what
+          # `releases/latest/download/latest.json` serves to the updater.
+          # v0.7.0 shipped green while that pointer still named v0.6.2, so
+          # every client saw "no update available" indefinitely.
+          gh api "repos/${{ github.repository }}/releases/$RELEASE_ID" \
+            --method PATCH -F draft=false -F prerelease=false -F make_latest=true
+
+          # Assert the pointer actually moved: a silently-stale `latest` is
+          # indistinguishable from a healthy release until users stop updating.
+          ACTUAL="$(gh api repos/${{ github.repository }}/releases/latest --jq .tag_name)"
+          if [ "$ACTUAL" != "$TAG" ]; then
+            echo "::error::latest release is $ACTUAL, expected $TAG"
+            exit 1
+          fi
+          echo "Verified: latest release is $ACTUAL"
