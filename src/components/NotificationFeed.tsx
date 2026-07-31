@@ -7,6 +7,7 @@ import { FilterBar } from "./FilterBar";
 import { EmptyState } from "./EmptyState";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ActivityItem } from "../types/activity";
+import { passesProjectFilter } from "../utils/projectFilter";
 
 /** Best-effort: detect if an activity is an Assignee change whose `added` names a given user. */
 function isAssigneeChangeTo(activity: ActivityItem, userLogin: string | null, userId: string | null): boolean {
@@ -24,13 +25,6 @@ function isAssigneeChangeTo(activity: ActivityItem, userLogin: string | null, us
 }
 
 /** Resolve the project key for an activity. */
-function resolveProjectKey(activity: ActivityItem): string {
-  const t = activity.target;
-  if (!t) return "unknown";
-  const p = t.project ?? t.issue?.project ?? t.article?.project;
-  return p?.shortName ?? p?.id ?? "unknown";
-}
-
 /** Resolve the issue readable ID for an activity (for mute matching). */
 function resolveIssueIdForFilter(activity: ActivityItem): string | null {
   const t = activity.target;
@@ -184,19 +178,19 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
     return activities.filter((a) => {
-      // Filter out current user's own activities
-      if (currentUserId && a.author?.id === currentUserId) return false;
+      // Filter out current user's own activities — unless they were @-mentioned
+      // in them. Providers show self-mentions in their own notification lists,
+      // so hiding them here makes the feed disagree with the source of truth.
+      if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe) return false;
 
       // Account filter
       if (selectedAccounts.size > 0 && a.accountId) {
         if (!selectedAccounts.has(a.accountId)) return false;
       }
 
-      // Project filter (empty = show all)
-      if (selectedProjects.size > 0) {
-        const pk = resolveProjectKey(a);
-        if (!selectedProjects.has(pk)) return false;
-      }
+      // Project filter — per-account, so chips selected for one account never
+      // hide another's events (empty selection for an account = show all).
+      if (!passesProjectFilter(a, selectedProjects)) return false;
 
       // Type filter (empty = show all)
       if (selectedTypes.size > 0) {

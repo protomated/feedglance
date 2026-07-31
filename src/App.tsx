@@ -18,6 +18,7 @@ import { ToastContainer } from "./components/Toast";
 import { UpdateBanner, checkForUpdate } from "./components/UpdateBanner";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { ActivityItem } from "./types/activity";
+import { passesProjectFilter } from "./utils/projectFilter";
 import "./App.css";
 
 type View = "feed" | "settings";
@@ -26,14 +27,6 @@ const SETTINGS_STORE = "settings.json";
 const KEY_GLOBAL_SHORTCUT = "global_shortcut";
 const IS_MAC = navigator.platform.toUpperCase().includes("MAC");
 export const DEFAULT_SHORTCUT = IS_MAC ? "CommandOrControl+Shift+Y" : "Control+Shift+Y";
-
-/** Resolve the project key for an activity. */
-function resolveProjectKey(activity: ActivityItem): string {
-  const t = activity.target;
-  if (!t) return "unknown";
-  const p = t.project ?? t.issue?.project ?? t.article?.project;
-  return p?.shortName ?? p?.id ?? "unknown";
-}
 
 /** Resolve the issue readable ID for mute matching. */
 function resolveIssueIdForFilter(activity: ActivityItem): string | null {
@@ -130,14 +123,11 @@ function App() {
   // matches what the feed actually shows.
   const flatActivities = useMemo(() => {
     return activities.filter((a) => {
-      if (currentUserId && a.author?.id === currentUserId) return false;
+      if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe) return false;
       if (selectedAccounts.size > 0 && a.accountId) {
         if (!selectedAccounts.has(a.accountId)) return false;
       }
-      if (selectedProjects.size > 0) {
-        const pk = resolveProjectKey(a);
-        if (!selectedProjects.has(pk)) return false;
-      }
+      if (!passesProjectFilter(a, selectedProjects)) return false;
       if (selectedTypes.size > 0) {
         const cat = a.category?.id;
         if (!cat || !selectedTypes.has(cat as any)) return false;

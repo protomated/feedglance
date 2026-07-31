@@ -51,6 +51,15 @@ export interface ActivityItem {
   activityType?: string; // $type from API
   /** Account ID this activity belongs to (injected by polling engine). */
   accountId?: string;
+  /**
+   * True when the current user is @-mentioned or directly targeted.
+   *
+   * Carried through from the normalized event so the feed can exempt mentions
+   * from own-activity filtering: a comment you wrote that tags you is a real
+   * notification in the provider's own UI, and hiding it makes the app disagree
+   * with what the user sees there.
+   */
+  mentionsMe?: boolean;
 }
 
 /** Category IDs matching YouTrack API. */
