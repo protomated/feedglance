@@ -429,7 +429,7 @@ function App() {
       {/* Header */}
       <header className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800">
         <div className="flex items-center gap-2">
-          <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">YouTrackd</h1>
+          <h1 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Feedglance</h1>
           <ConnectionStatus onClickError={() => setView("settings")} />
         </div>
         <div className="flex items-center gap-3">

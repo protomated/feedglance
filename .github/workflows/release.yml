@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for a manual release (e.g. youtrackd-v0.2.1). Leave blank to auto-bump from conventional commits.'
+        description: 'Tag name for a manual release (e.g. feedglance-v0.2.1). Leave blank to auto-bump from conventional commits.'
         required: false
         type: string
 
@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG_PREFIX="youtrackd-v"
+          TAG_PREFIX="feedglance-v"
 
           # ── Manual dispatch with an explicit tag: use it verbatim. ──
           if [ -n "${MANUAL_TAG:-}" ]; then
@@ -114,9 +114,9 @@ jobs:
           node -e "const f='src-tauri/tauri.conf.json';const j=require('./'+f);j.version='$NEW_VERSION';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n');"
           # src-tauri/Cargo.toml — bump the [package] version (first version= line).
           perl -0pi -e 's/^version = "\d+\.\d+\.\d+"/version = "'"$NEW_VERSION"'"/m' src-tauri/Cargo.toml
-          # Keep Cargo.lock's youtrackd entry in step so CI doesn't drift.
+          # Keep Cargo.lock's feedglance entry in step so CI doesn't drift.
           if command -v cargo >/dev/null 2>&1; then
-            (cd src-tauri && cargo update -p youtrackd --precise "$NEW_VERSION" 2>/dev/null) || true
+            (cd src-tauri && cargo update -p feedglance --precise "$NEW_VERSION" 2>/dev/null) || true
           fi
 
           # ── Commit the version bump and push the tag. ──
@@ -130,7 +130,7 @@ jobs:
 
           # ── Create a draft release; build job fills it, publish job flips it live. ──
           gh release create "$NEW_TAG" \
-            --title "YouTrackd $NEW_TAG" \
+            --title "Feedglance $NEW_TAG" \
             --draft --prerelease \
             --generate-notes
 
@@ -204,11 +204,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.version.outputs.tag_name }}
-          releaseName: 'YouTrackd ${{ needs.version.outputs.tag_name }}'
+          releaseName: 'Feedglance ${{ needs.version.outputs.tag_name }}'
           releaseBody: |
             See the assets below to download and install.
 
-            > **macOS users:** This app is not code-signed. See the [README](https://github.com/protomated/youtrackd#running-unsigned-builds) for instructions on how to open unsigned apps.
+            > **macOS users:** This app is not code-signed. See the [README](https://github.com/protomated/feedglance#running-unsigned-builds) for instructions on how to open unsigned apps.
           releaseDraft: true
           prerelease: true
           includeUpdaterJson: true
