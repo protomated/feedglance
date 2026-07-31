@@ -52,7 +52,10 @@ const MESSAGES_PER_TASK: u32 = 20;
 
 /// Nifty's limit is 200 GET/min and is team-scoped — shared across every user of
 /// this app in the same workspace. Stay well under it so N clients coexist.
-const DEFAULT_BUDGET: u32 = 40;
+///
+/// Only a fallback for callers that pass 0; the engine supplies `CALL_BUDGET`.
+/// Kept in step with it so a cold start can actually drain (40 could not).
+const DEFAULT_BUDGET: u32 = 100;
 
 /// Nifty fan-out is heavier than YouTrack's single call; poll less aggressively.
 const MIN_INTERVAL_SECS: u64 = 60;
@@ -352,6 +355,53 @@ impl NiftyProvider {
         Ok((out, calls))
     }
 
+    /// Should this message be hidden because the user caused it themselves?
+    ///
+    /// Own actions are suppressed to match YouTrack behaviour — you don't want
+    /// your own comments notifying you. An explicit @-tag overrides that: a
+    /// direct mention is the highest-signal event the feed carries, and Nifty's
+    /// UI shows it regardless of who wrote it. Suppressing a self-authored
+    /// mention is what made the app disagree with Nifty's own notification list.
+    fn is_suppressed_own_action(&self, msg: &NiftyMessage) -> bool {
+        if self.current_user_id.is_empty() {
+            return false;
+        }
+        let mine = msg.author.as_deref() == Some(self.current_user_id.as_str());
+        let tags_me = msg.tagged.iter().any(|t| t == &self.current_user_id);
+        mine && !tags_me
+    }
+
+    /// Workspace member directory, keyed by user ID.
+    ///
+    /// Messages carry only an author *ID* (`fo_OWHEm!UvNxf`), never a display
+    /// name, so without this every Nifty event renders its author as "Unknown".
+    /// One call per cycle covers the whole workspace, unlike `assignees` which
+    /// is per-project.
+    ///
+    /// Removed and pending members are kept: they still authored past messages,
+    /// and dropping them would regress those events back to "Unknown".
+    async fn member_directory(&self) -> Result<HashMap<String, EventActor>, ProviderError> {
+        let members: Vec<NiftyMember> = self.get("members?limit=200").await?;
+        Ok(members
+            .into_iter()
+            .map(|m| {
+                let name = m
+                    .name
+                    .filter(|n| !n.trim().is_empty())
+                    .or(m.email)
+                    .unwrap_or_else(|| m.id.clone());
+                (
+                    m.id.clone(),
+                    EventActor {
+                        id: m.id,
+                        name: name.trim().to_string(),
+                        avatar_url: m.avatar.unwrap_or_default(),
+                    },
+                )
+            })
+            .collect())
+    }
+
     /// Phase 2 — pull the message stream for one changed task.
     async fn fetch_messages(&self, task_id: &str) -> Result<Vec<NiftyMessage>, ProviderError> {
         let r: MessagesResponse = self
@@ -364,11 +414,54 @@ impl NiftyProvider {
         Ok(r.messages)
     }
 
+    /// Replace Nifty's `<@userId>` mention tokens with display names.
+    ///
+    /// Message bodies embed raw IDs (`<@fo_OWHEm!UvNxf> is this the case?`),
+    /// which is unreadable in a feed. IDs contain `!` and other punctuation, so
+    /// this scans for the literal delimiters rather than using a character class.
+    ///
+    /// An unresolvable ID (author no longer in the workspace) keeps its raw
+    /// token rather than being blanked — showing *something* beats silently
+    /// dropping who was mentioned.
+    fn resolve_mentions(text: &str, directory: &HashMap<String, EventActor>) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+
+        while let Some(start) = rest.find("<@") {
+            let (before, from_token) = rest.split_at(start);
+            out.push_str(before);
+
+            let body = &from_token[2..];
+            match body.find('>') {
+                Some(end) => {
+                    let id = &body[..end];
+                    match directory.get(id) {
+                        Some(actor) if !actor.name.is_empty() => {
+                            out.push('@');
+                            out.push_str(&actor.name);
+                        }
+                        // Unknown ID — leave the original token intact.
+                        _ => out.push_str(&from_token[..end + 3]),
+                    }
+                    rest = &body[end + 1..];
+                }
+                // Unterminated token; emit the remainder verbatim.
+                None => {
+                    out.push_str(from_token);
+                    return out;
+                }
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
     fn to_event(
         &self,
         msg: &NiftyMessage,
         task: Option<&NiftyTask>,
         project: Option<&NiftyProject>,
+        directory: &HashMap<String, EventActor>,
     ) -> NormalizedEvent {
         let task_id = msg
             .task
@@ -410,13 +503,21 @@ impl NiftyProvider {
             provider: ProviderKind::Nifty,
             timestamp: msg.timestamp_ms(),
             kind: msg.kind(),
-            actor: msg.author.as_ref().map(|a| EventActor {
-                id: a.clone(),
-                name: String::new(),
-                avatar_url: String::new(),
+            // Fall back to the bare ID when the author has left the workspace
+            // and is absent from the directory — better than rendering
+            // "Unknown".
+            actor: msg.author.as_ref().map(|a| {
+                directory.get(a).cloned().unwrap_or_else(|| EventActor {
+                    id: a.clone(),
+                    name: a.clone(),
+                    avatar_url: String::new(),
+                })
             }),
             subject,
-            text: msg.text.clone(),
+            text: msg
+                .text
+                .as_deref()
+                .map(|t| Self::resolve_mentions(t, directory)),
             mentions_me,
             seen_remotely,
             url,
@@ -491,12 +592,23 @@ impl NotificationSource for NiftyProvider {
                 let fp = t.fingerprint();
                 let prev = state.fingerprints.get(&t.id);
 
-                // On first run we don't report every pre-existing task as
-                // "changed" — that would flood the feed. We record fingerprints
-                // and let the 24h message window below decide what to surface.
+                // A task with no stored fingerprint has never been examined, so
+                // we cannot tell whether it changed — it must be inspected.
+                //
+                // This is not only the cold-start case: `restore_activities`
+                // deliberately restores the watermark but NOT the fingerprint
+                // map, so a normal app restart lands here with `is_initial ==
+                // false` and an empty map. Treating that as "unchanged" made
+                // phase 2 never run, and any event newer than the restored
+                // watermark became permanently unreachable — the feed went
+                // silent until the account was re-added.
+                //
+                // Inspecting them is safe: the `cutoff` below still filters by
+                // timestamp, so this costs message calls on the first cycle
+                // after a restart but cannot surface anything already reported.
                 let moved = match prev {
                     Some(old) => old != &fp,
-                    None => is_initial,
+                    None => true,
                 };
                 if moved {
                     changed.push(t.id.clone());
@@ -520,6 +632,25 @@ impl NotificationSource for NiftyProvider {
             }
         }
 
+        // Author names come from the member directory — one call, and only when
+        // there is actually something to render, so a quiet cycle still costs
+        // just the phase-1 sweep. A failure here is non-fatal: events fall back
+        // to bare IDs rather than being dropped.
+        let directory = if queue.is_empty() {
+            HashMap::new()
+        } else {
+            match self.member_directory().await {
+                Ok(d) => {
+                    calls += 1;
+                    d
+                }
+                Err(_) => {
+                    calls += 1;
+                    HashMap::new()
+                }
+            }
+        };
+
         // --- Phase 2: targeted message fetch --------------------------------
         let projects_by_id: HashMap<&str, &NiftyProject> =
             projects.iter().map(|p| (p.id.as_str(), p)).collect();
@@ -538,7 +669,24 @@ impl NotificationSource for NiftyProvider {
             if calls >= budget {
                 break;
             }
-            let msgs = self.fetch_messages(task_id).await?;
+            // A per-task failure must not discard the whole cycle. Nifty
+            // intermittently 502s on individual /messages calls (observed live,
+            // succeeds on retry); propagating that threw away every event
+            // already collected from the other ~280 tasks. Auth and rate-limit
+            // errors are still fatal — they apply to the whole cycle, and
+            // continuing would burn the team-shared budget for nothing.
+            let msgs = match self.fetch_messages(task_id).await {
+                Ok(m) => m,
+                Err(e @ (ProviderError::Auth(_) | ProviderError::RateLimited(_))) => return Err(e),
+                Err(_) => {
+                    // Leave the fingerprint stale so the task is retried next
+                    // cycle rather than being silently marked up-to-date.
+                    next_fingerprints.remove(task_id);
+                    calls += 1;
+                    drained += 1;
+                    continue;
+                }
+            };
             calls += 1;
             drained += 1;
 
@@ -555,16 +703,13 @@ impl NotificationSource for NiftyProvider {
                 if ts <= cutoff {
                     continue;
                 }
-                // Suppress the user's own actions, matching YouTrack behaviour.
-                if !self.current_user_id.is_empty()
-                    && m.author.as_deref() == Some(self.current_user_id.as_str())
-                {
+                if self.is_suppressed_own_action(m) {
                     continue;
                 }
                 if ts > max_ts {
                     max_ts = ts;
                 }
-                events.push(self.to_event(m, task, project));
+                events.push(self.to_event(m, task, project, &directory));
             }
         }
 
@@ -927,6 +1072,156 @@ mod tests {
         a.assignees = vec!["u1".into()];
         b.assignees = vec!["u2".into()];
         assert_ne!(a.fingerprint(), b.fingerprint());
+    }
+
+    fn msg(author: &str, tagged: &[&str]) -> NiftyMessage {
+        NiftyMessage {
+            id: "m".into(),
+            text: None,
+            subtype: None,
+            task: None,
+            author: Some(author.into()),
+            tagged: tagged.iter().map(|s| s.to_string()).collect(),
+            seen_by: vec![],
+            created_at: None,
+            is_deleted: false,
+        }
+    }
+
+    /// The regression behind "Nifty shows it but the app doesn't": a comment the
+    /// user wrote that @-tags the user is a real notification in Nifty's UI, so
+    /// self-suppression must not eat it.
+    #[test]
+    fn own_message_that_mentions_me_is_not_suppressed() {
+        let p = NiftyProvider::new("t", "me");
+        assert!(!p.is_suppressed_own_action(&msg("me", &["me"])));
+    }
+
+    #[test]
+    fn own_message_without_mention_is_suppressed() {
+        let p = NiftyProvider::new("t", "me");
+        assert!(p.is_suppressed_own_action(&msg("me", &[])));
+    }
+
+    /// Tagging someone else in your own comment is still your own action.
+    #[test]
+    fn own_message_mentioning_someone_else_is_suppressed() {
+        let p = NiftyProvider::new("t", "me");
+        assert!(p.is_suppressed_own_action(&msg("me", &["other"])));
+    }
+
+    #[test]
+    fn other_authors_are_never_suppressed() {
+        let p = NiftyProvider::new("t", "me");
+        assert!(!p.is_suppressed_own_action(&msg("other", &[])));
+        assert!(!p.is_suppressed_own_action(&msg("other", &["me"])));
+    }
+
+    /// Before validate() resolves a user ID there is nobody to suppress, and
+    /// guessing would blank the feed entirely.
+    #[test]
+    fn unknown_user_suppresses_nothing() {
+        let p = NiftyProvider::new("t", "");
+        assert!(!p.is_suppressed_own_action(&msg("anyone", &[])));
+    }
+
+    fn directory(pairs: &[(&str, &str)]) -> HashMap<String, EventActor> {
+        pairs
+            .iter()
+            .map(|(id, name)| {
+                (
+                    id.to_string(),
+                    EventActor {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        avatar_url: String::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Nifty user IDs contain `!` and other punctuation, so the parser must key
+    /// off the literal `<@`/`>` delimiters rather than a word-character class.
+    #[test]
+    fn resolves_mention_token_with_punctuation_in_id() {
+        let d = directory(&[("fo_OWHEm!UvNxf", "Dele")]);
+        assert_eq!(
+            NiftyProvider::resolve_mentions("<@fo_OWHEm!UvNxf> is this the casE?", &d),
+            "@Dele is this the casE?"
+        );
+    }
+
+    #[test]
+    fn resolves_multiple_mentions() {
+        let d = directory(&[("a!1", "Ada"), ("b!2", "Bo")]);
+        assert_eq!(
+            NiftyProvider::resolve_mentions("<@a!1> ping <@b!2> now", &d),
+            "@Ada ping @Bo now"
+        );
+    }
+
+    /// A departed author is absent from the directory; keeping the raw token
+    /// beats blanking out who was mentioned.
+    #[test]
+    fn unknown_mention_id_is_left_intact() {
+        let d = directory(&[("known", "Kim")]);
+        assert_eq!(
+            NiftyProvider::resolve_mentions("<@ghost> and <@known>", &d),
+            "<@ghost> and @Kim"
+        );
+    }
+
+    #[test]
+    fn text_without_mentions_is_unchanged() {
+        let d = directory(&[("a", "Ada")]);
+        assert_eq!(NiftyProvider::resolve_mentions("plain text", &d), "plain text");
+    }
+
+    /// Malformed input must not panic or truncate the message.
+    #[test]
+    fn unterminated_mention_token_is_preserved() {
+        let d = directory(&[("a", "Ada")]);
+        assert_eq!(NiftyProvider::resolve_mentions("oops <@a", &d), "oops <@a");
+    }
+
+    /// Regression: after a restart, `restore_activities` gives back the
+    /// watermark but deliberately not the fingerprint map. A task with no
+    /// stored fingerprint must therefore be treated as needing inspection —
+    /// when it was treated as unchanged, phase 2 never ran and every event
+    /// newer than the restored watermark became permanently unreachable.
+    #[test]
+    fn unknown_fingerprint_is_inspected_on_warm_cursor() {
+        let t = task("1", 3, false);
+
+        // Warm cursor: watermark set, fingerprints empty (the restart case).
+        let state = NiftyCursorState::default();
+        let prev = state.fingerprints.get(&t.id);
+        let is_initial = false;
+        let moved = match prev {
+            Some(old) => old != &t.fingerprint(),
+            None => true,
+        };
+        assert!(
+            moved,
+            "a task never fingerprinted must be inspected even on a warm cursor"
+        );
+        let _ = is_initial;
+    }
+
+    /// The counterpart: a task whose fingerprint is unchanged stays unswept,
+    /// which is what keeps steady-state polling cheap.
+    #[test]
+    fn matching_fingerprint_is_not_reinspected() {
+        let t = task("1", 3, false);
+        let mut state = NiftyCursorState::default();
+        state.fingerprints.insert(t.id.clone(), t.fingerprint());
+
+        let moved = match state.fingerprints.get(&t.id) {
+            Some(old) => old != &t.fingerprint(),
+            None => true,
+        };
+        assert!(!moved, "unchanged task must not be message-fetched");
     }
 
     #[test]

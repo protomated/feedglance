@@ -3,7 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { useFilterStore } from "../stores/filters";
 import { useAuthStore } from "../stores/auth";
 import { useNotificationStore } from "../stores/notifications";
-import type { ActivityCategoryId, ActivityItem } from "../types/activity";
+import type { ActivityCategoryId } from "../types/activity";
+import {
+  projectKeyOfScopedKey,
+  resolveProjectKey,
+  resolveProjectName,
+  scopedProjectKey,
+} from "../utils/projectFilter";
 
 /** Human-readable labels for each activity category. */
 const CATEGORY_LABELS: Record<ActivityCategoryId, string> = {
@@ -23,19 +29,12 @@ interface ProjectEntry {
   name: string;
 }
 
-/** Resolve the project key for an activity (mirrors notifications store helper). */
-function resolveProjectKey(activity: ActivityItem): string {
-  const t = activity.target;
-  if (!t) return "unknown";
-  const p = t.project ?? t.issue?.project ?? t.article?.project;
-  return p?.shortName ?? p?.id ?? "unknown";
-}
-
-function resolveProjectName(activity: ActivityItem): string {
-  const t = activity.target;
-  if (!t) return "unknown";
-  const p = t.project ?? t.issue?.project ?? t.article?.project;
-  return p?.name ?? p?.shortName ?? p?.id ?? "unknown";
+/** A project chip: account-scoped key, display name, and owning account. */
+interface ProjectChip {
+  key: string;
+  name: string;
+  accountId: string;
+  accountLabel: string;
 }
 
 export function FilterBar() {
@@ -48,6 +47,7 @@ export function FilterBar() {
   const searchQuery = useFilterStore((s) => s.searchQuery);
   const assignedToMeOnly = useFilterStore((s) => s.assignedToMeOnly);
   const toggleProject = useFilterStore((s) => s.toggleProject);
+  const migrateProjectKeys = useFilterStore((s) => s.migrateProjectKeys);
   const toggleType = useFilterStore((s) => s.toggleType);
   const toggleAccount = useFilterStore((s) => s.toggleAccount);
   const setSearchQuery = useFilterStore((s) => s.setSearchQuery);
@@ -55,53 +55,90 @@ export function FilterBar() {
   const clearAll = useFilterStore((s) => s.clearAll);
   const hasAnyUser = useAuthStore((s) => s.accounts.some((a) => !!a.user?.login || !!a.user?.id));
 
-  const [apiProjects, setApiProjects] = useState<ProjectEntry[]>([]);
+  // API-fetched projects, kept per account — a project key is only meaningful
+  // within its own account, so a flat list would merge same-named projects from
+  // different accounts into one chip.
+  const [apiProjects, setApiProjects] = useState<Map<string, ProjectEntry[]>>(new Map());
 
-  // Fetch all projects from all connected accounts
+  // Fetch projects from all connected accounts.
   useEffect(() => {
     const connectedAccounts = accounts.filter(
       (a) => connectionStatuses[a.id] === "connected"
     );
     if (connectedAccounts.length === 0) return;
 
+    let cancelled = false;
     const fetchAll = async () => {
-      const allProjects: ProjectEntry[] = [];
-      const seen = new Set<string>();
+      const byAccount = new Map<string, ProjectEntry[]>();
       for (const account of connectedAccounts) {
+        // `get_projects` is YouTrack-only; Nifty projects are derived from
+        // activities below rather than fetched.
+        if ((account.provider ?? "youtrack") !== "youtrack") continue;
         try {
           const projects = await invoke<ProjectEntry[]>("get_projects", {
             url: account.url,
             token: account.token,
           });
-          for (const p of projects) {
-            if (!seen.has(p.shortName)) {
-              seen.add(p.shortName);
-              allProjects.push(p);
-            }
-          }
+          byAccount.set(account.id, projects);
         } catch {
           // Fallback: derive from activities
         }
       }
-      setApiProjects(allProjects);
+      if (!cancelled) setApiProjects(byAccount);
     };
     fetchAll();
+    return () => {
+      cancelled = true;
+    };
   }, [accounts, connectionStatuses]);
 
-  // Merge API projects with activity-derived projects (API projects take priority)
-  const projects = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const p of apiProjects) {
-      map.set(p.shortName, p.name);
+  // Merge API projects with activity-derived ones, scoped per account so chips
+  // from different accounts never collide (API projects take priority).
+  const projects = useMemo<ProjectChip[]>(() => {
+    const labelOf = new Map(accounts.map((a) => [a.id, a.label || a.url || ""]));
+    const chips = new Map<string, ProjectChip>();
+
+    const add = (accountId: string, projectKey: string, name: string) => {
+      if (!projectKey || projectKey === "unknown") return;
+      const key = scopedProjectKey(accountId, projectKey);
+      if (chips.has(key)) return;
+      chips.set(key, {
+        key,
+        name,
+        accountId,
+        accountLabel: labelOf.get(accountId) ?? "",
+      });
+    };
+
+    for (const [accountId, entries] of apiProjects) {
+      for (const p of entries) add(accountId, p.shortName, p.name);
     }
     for (const a of activities) {
-      const key = resolveProjectKey(a);
-      if (key !== "unknown" && !map.has(key)) {
-        map.set(key, resolveProjectName(a));
-      }
+      add(a.accountId ?? "", resolveProjectKey(a), resolveProjectName(a));
     }
-    return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [apiProjects, activities]);
+
+    return Array.from(chips.values()).sort(
+      (x, y) => x.accountLabel.localeCompare(y.accountLabel) || x.name.localeCompare(y.name),
+    );
+  }, [apiProjects, activities, accounts]);
+
+  /** Show the owning account on chips only when more than one account exists. */
+  const showAccountOnChips = accounts.length > 1;
+
+  // One-time upgrade of pre-scoping selections. Deferred to here because
+  // binding a bare project key to an account needs the per-account key sets,
+  // which only exist once projects and activities have loaded.
+  useEffect(() => {
+    if (projects.length === 0) return;
+    const byAccount = new Map<string, Set<string>>();
+    for (const chip of projects) {
+      const bare = projectKeyOfScopedKey(chip.key);
+      const set = byAccount.get(chip.accountId) ?? new Set<string>();
+      set.add(bare);
+      byAccount.set(chip.accountId, set);
+    }
+    migrateProjectKeys(byAccount);
+  }, [projects, migrateProjectKeys]);
 
   const hasActiveFilters =
     selectedProjects.size > 0 ||
@@ -168,19 +205,24 @@ export function FilterBar() {
       {/* Project chips */}
       {projects.length > 1 && (
         <div className="px-3 pb-1.5 flex flex-wrap gap-1">
-          {projects.map(([key, name]) => {
-            const active = selectedProjects.has(key);
+          {projects.map((chip) => {
+            const active = selectedProjects.has(chip.key);
             return (
               <button
-                key={key}
-                onClick={() => toggleProject(key)}
+                key={chip.key}
+                onClick={() => toggleProject(chip.key)}
+                title={
+                  showAccountOnChips && chip.accountLabel
+                    ? `${chip.name} — ${chip.accountLabel}`
+                    : chip.name
+                }
                 className={`text-[10px] px-1.5 py-0.5 rounded-full transition-colors ${
                   active
                     ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 border border-blue-300 dark:border-blue-700"
                     : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-transparent hover:bg-gray-200 dark:hover:bg-gray-600"
                 }`}
               >
-                {name}
+                {chip.name}
               </button>
             );
           })}
