@@ -91,7 +91,7 @@ export function Onboarding() {
     <div className="flex flex-col items-center justify-center min-h-screen p-6 bg-gray-50 dark:bg-gray-900">
       <div className="w-full max-w-sm">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-1">
-          YouTrackd
+          Feedglance
         </h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">
           Connect an account to get started.

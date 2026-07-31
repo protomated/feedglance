@@ -414,7 +414,7 @@ fn send_batch_notification(app_handle: &AppHandle, count: u32, provider: Provide
         if count == 1 { "" } else { "s" },
         name
     );
-    send_titled_notification(app_handle, "YouTrackd", &body);
+    send_titled_notification(app_handle, "Feedglance", &body);
 }
 
 #[cfg(test)]

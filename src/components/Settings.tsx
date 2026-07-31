@@ -343,7 +343,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
         </h3>
         <div className="px-3 py-1.5 space-y-0.5">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-gray-700 dark:text-gray-300">YouTrackd</span>
+            <span className="text-sm text-gray-700 dark:text-gray-300">Feedglance</span>
             {appVersion && (
               <span className="text-xs font-mono text-gray-500 dark:text-gray-400">v{appVersion}</span>
             )}

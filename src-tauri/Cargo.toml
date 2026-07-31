@@ -1,12 +1,12 @@
 [package]
-name = "youtrackd"
+name = "feedglance"
 version = "0.6.2" # x-release-please-version
-description = "YouTrack Cloud notifications in your system tray"
+description = "YouTrack and Nifty notifications in your system tray"
 authors = ["Protomated"]
 edition = "2021"
 
 [lib]
-name = "youtrackd_lib"
+name = "feedglance_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

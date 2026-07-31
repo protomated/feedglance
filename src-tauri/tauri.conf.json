@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "YouTrackd",
+  "productName": "Feedglance",
   "version": "0.6.2",
-  "identifier": "com.protomated.youtrackd",
+  "identifier": "com.protomated.feedglance",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "YouTrackd",
+        "title": "Feedglance",
         "width": 380,
         "height": 600,
         "resizable": false,
@@ -43,7 +43,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDU4QjQ5NTMzNDgxQzgwOTAKUldTUWdCeElNNVcwV0EzbkZ3RFZBaitFVGhRd2t4S1VNQjdRUTQ5V3pNdzQreWJ0MW1ncndLTVYK",
       "endpoints": [
-        "https://github.com/protomated/youtrackd/releases/latest/download/latest.json"
+        "https://github.com/protomated/feedglance/releases/latest/download/latest.json"
       ]
     }
   }
