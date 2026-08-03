@@ -241,8 +241,22 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const pinnedCount = filteredActivities.filter((a) => pinnedIds.has(a.id)).length;
   const groups = groupActivities(visibleActivities, readIds);
 
-  const handleOpenInBrowser = (targetId: string, targetType?: string, accountId?: string) => {
-    // Resolve base URL from the activity's account
+  const handleOpenInBrowser = (
+    targetId: string,
+    targetType?: string,
+    accountId?: string,
+    activityUrl?: string,
+  ) => {
+    // The provider already computed this, and only it knows the URL shape:
+    // Nifty tasks live at /{projectId}/task/{taskId}, which the YouTrack-style
+    // reconstruction below cannot produce. Always prefer it.
+    if (activityUrl) {
+      openUrl(activityUrl);
+      return;
+    }
+
+    // Fallback for events cached before `url` was carried through the feed.
+    // YouTrack-shaped by construction, so it is only correct for YouTrack.
     let baseUrl: string | undefined;
     if (accountId) {
       const account = accounts.find((a) => a.id === accountId);

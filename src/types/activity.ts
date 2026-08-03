@@ -60,6 +60,16 @@ export interface ActivityItem {
    * with what the user sees there.
    */
   mentionsMe?: boolean;
+  /**
+   * Deep link into the provider's web UI, as computed by the provider.
+   *
+   * Carried through from the normalized event because the URL shape is
+   * provider-specific — YouTrack's `/issue/{displayId}` and Nifty's
+   * `/{projectId}/task/{taskId}` share no structure — and only the backend
+   * knows the workspace host. Rebuilding it in the UI produces a YouTrack-shaped
+   * link for every provider.
+   */
+  url?: string;
 }
 
 /** Category IDs matching YouTrack API. */

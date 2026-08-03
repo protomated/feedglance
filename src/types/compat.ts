@@ -49,7 +49,12 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
   // YouTrack: `raw` is the original activity — return it untouched so existing
   // rendering (field diffs, comment text, article targets) is unchanged.
   if (event.provider === "youtrack" && isLegacyActivity(event.raw)) {
-    return { ...event.raw, accountId: event.accountId, mentionsMe: event.mentionsMe };
+    return {
+      ...event.raw,
+      accountId: event.accountId,
+      mentionsMe: event.mentionsMe,
+      url: event.url,
+    };
   }
 
   const project = event.subject.projectId
@@ -105,6 +110,7 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
     activityType: event.provider,
     accountId: event.accountId,
     mentionsMe: event.mentionsMe,
+    url: event.url,
   };
 }
 
