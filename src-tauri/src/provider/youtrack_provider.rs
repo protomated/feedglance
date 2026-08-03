@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 
-use super::actions::{ActionSource, AssigneeOption, StatusOption};
+use super::actions::{render_mentions, ActionSource, AssigneeOption, StatusOption};
 use super::{
     Cursor, EventActor, EventKind, EventSubject, FetchResult, NormalizedEvent, NotificationSource,
     ProviderError, ProviderKind,
@@ -217,8 +217,12 @@ impl ActionSource for YouTrackProvider {
         if text.trim().is_empty() {
             return Err(ProviderError::Other("Comment text is empty".into()));
         }
+        // YouTrack links mentions from a bare `@login`, and `assignees()` sets
+        // `id` to the login, so the token renders to exactly the text this used
+        // to post before mentions became structured.
+        let body = render_mentions(text, |m| format!("@{}", m.id));
         self.client
-            .post_comment(item_id, text)
+            .post_comment(item_id, &body)
             .await
             .map(|_| ())
             .map_err(|e| ProviderError::Other(e.to_string()))
