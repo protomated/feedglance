@@ -36,7 +36,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use super::actions::{ActionSource, AssigneeOption, StatusOption};
+use super::actions::{render_mentions, ActionSource, AssigneeOption, StatusOption};
 use super::{
     Cursor, EventActor, EventKind, EventSubject, FetchResult, NormalizedEvent, NotificationSource,
     ProviderError, ProviderKind,
@@ -825,13 +825,17 @@ impl ActionSource for NiftyProvider {
         if text.trim().is_empty() {
             return Err(ProviderError::Other("Comment text is empty".into()));
         }
+        // Nifty links a mention only from a `<@userId>` token — the same form
+        // `resolve_mentions` decodes on the way in. Sending the display name or
+        // email as plain text posts fine but links nobody and notifies nobody.
+        let body = render_mentions(text, |m| format!("<@{}>", m.id));
         // Verified live: type=text + task_id creates a task comment (HTTP 201).
         self.send_json(
             reqwest::Method::POST,
             "messages",
             serde_json::json!({
                 "type": "text",
-                "text": text,
+                "text": body,
                 "task_id": item_id,
             }),
         )

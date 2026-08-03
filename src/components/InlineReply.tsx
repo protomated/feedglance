@@ -28,6 +28,8 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
   const [mentionStart, setMentionStart] = useState(-1);
   const [members, setMembers] = useState<AssigneeOption[]>([]);
   const [filtered, setFiltered] = useState<AssigneeOption[]>([]);
+  /** People picked from the dropdown, so their IDs survive to send time. */
+  const [mentioned, setMentioned] = useState<AssigneeOption[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -73,13 +75,17 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
   };
 
   const insertMention = (member: AssigneeOption) => {
-    // Replace @query with @login
+    // The box shows a readable `@Name`; the ID needed to actually link the
+    // mention rides along in `mentioned` and is reattached in serializeMentions.
     const before = text.slice(0, mentionStart);
     const after = text.slice(
       mentionStart + 1 + (mentionQuery?.length ?? 0)
     );
-    const newText = `${before}@${member.login} ${after}`;
+    const newText = `${before}@${member.name} ${after}`;
     setText(newText);
+    setMentioned((prev) =>
+      prev.some((m) => m.id === member.id) ? prev : [...prev, member]
+    );
     closeMention();
 
     // Re-focus and set cursor position after the inserted mention
@@ -87,7 +93,7 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
       const ta = textareaRef.current;
       if (ta) {
         ta.focus();
-        const cursorPos = before.length + 1 + member.login.length + 1;
+        const cursorPos = before.length + 1 + member.name.length + 1;
         ta.setSelectionRange(cursorPos, cursorPos);
       }
     });
@@ -128,12 +134,44 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
     }
   };
 
+  /**
+   * Turn the displayed `@Name` back into the `@[Name](id)` token the provider
+   * layer rewrites into provider-native mention markup.
+   *
+   * Matching is longest-name-first because display names contain spaces and one
+   * can prefix another ("Dele" vs "Dele Tosh") — shortest-first would match the
+   * prefix and strand the remainder. A name the user edited after picking it no
+   * longer matches, and is left as plain text: it posts as typed rather than
+   * linking the wrong person.
+   */
+  const serializeMentions = (raw: string) => {
+    const byLongestName = [...mentioned].sort(
+      (a, b) => b.name.length - a.name.length
+    );
+    let out = "";
+    let i = 0;
+    outer: while (i < raw.length) {
+      if (raw[i] === "@") {
+        for (const m of byLongestName) {
+          if (raw.startsWith(m.name, i + 1)) {
+            out += `@[${m.name}](${m.id})`;
+            i += 1 + m.name.length;
+            continue outer;
+          }
+        }
+      }
+      out += raw[i];
+      i += 1;
+    }
+    return out;
+  };
+
   const handleSubmit = async () => {
     if (!text.trim() || !credentials || submitting) return;
 
     setSubmitting(true);
     try {
-      await postComment(credentials, issueId, text.trim());
+      await postComment(credentials, issueId, serializeMentions(text.trim()));
       showToast("success", `Comment posted on ${issueId}`);
       if (activityId && !isRead) {
         await markRead(activityId, accountId);
