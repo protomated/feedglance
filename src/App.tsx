@@ -163,6 +163,14 @@ function App() {
       const activity = activities.find((a) => a.id === activityId);
       if (!activity) return;
 
+      // Prefer the provider-computed deep link. The reconstruction below keys
+      // off `idReadable`, which Nifty tasks do not have, so without this the
+      // shortcut silently did nothing on Nifty.
+      if (activity.url) {
+        openUrl(activity.url);
+        return;
+      }
+
       // Find the correct base URL from the activity's account
       let baseUrl: string | undefined;
       if (activity.accountId) {

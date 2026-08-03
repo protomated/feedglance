@@ -480,7 +480,12 @@ interface Props {
   isPinned?: boolean;
   isFocused?: boolean;
   onMarkRead: (id: string) => void;
-  onOpenInBrowser?: (targetId: string, targetType?: string, accountId?: string) => void;
+  onOpenInBrowser?: (
+    targetId: string,
+    targetType?: string,
+    accountId?: string,
+    url?: string,
+  ) => void;
 }
 
 export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
@@ -536,8 +541,16 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
 
   const handleOpenTarget = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!onOpenInBrowser || !resolved || !resolved.id) return;
-    onOpenInBrowser(resolved.id, resolved.type, activity.accountId);
+    if (!onOpenInBrowser) return;
+    // `activity.url` is provider-computed and stands on its own; the resolved
+    // target is only needed by the legacy reconstruction fallback.
+    if (!activity.url && (!resolved || !resolved.id)) return;
+    onOpenInBrowser(
+      resolved?.id ?? "",
+      resolved?.type,
+      activity.accountId,
+      activity.url,
+    );
   };
 
   const toggleAction = (action: ActiveAction) => {
