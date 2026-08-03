@@ -101,11 +101,20 @@ impl YouTrackProvider {
                 .and_then(|p| p.name.clone().or_else(|| p.short_name.clone())),
         };
 
-        let url = if display_id.is_empty() {
-            None
-        } else {
-            Some(format!("{}/issue/{}", self.base_url, display_id))
-        };
+        // YouTrack supplies a permalink on comment targets that lands on the
+        // comment itself; without it a deep link opens the top of the issue and
+        // the user has to hunt for what the notification was about. Plain issue
+        // targets carry no `url`, so they still get the issue link.
+        let url = target
+            .and_then(|t| t.url.clone())
+            .filter(|u| !u.is_empty())
+            .or_else(|| {
+                if display_id.is_empty() {
+                    None
+                } else {
+                    Some(format!("{}/issue/{}", self.base_url, display_id))
+                }
+            });
 
         NormalizedEvent {
             id: format!("youtrack:{}", a.id),
@@ -349,6 +358,65 @@ mod tests {
         assert_eq!(
             YouTrackProvider::kind_of(&activity("SomethingNew", None)),
             EventKind::Other
+        );
+    }
+
+    /// Build an activity whose target is a comment carrying `url`.
+    fn comment_activity(target_url: Option<&str>) -> ActivityItem {
+        let mut a = activity("CommentsCategory", None);
+        a.target = Some(crate::activities::ActivityTarget {
+            id: Some("4-17".into()),
+            id_readable: None,
+            target_type: Some("IssueComment".into()),
+            text: Some("hi".into()),
+            summary: None,
+            url: target_url.map(|u| u.to_string()),
+            project: None,
+            issue: Some(Box::new(crate::activities::ActivityTargetRef {
+                id: Some("2-33".into()),
+                id_readable: Some("PAC-1".into()),
+                summary: Some("Some issue".into()),
+                project: None,
+            })),
+            article: None,
+        });
+        a
+    }
+
+    /// The whole point: a comment notification must land on the comment, not
+    /// the top of a long issue.
+    #[test]
+    fn comment_permalink_is_preferred_over_the_issue_link() {
+        let p = YouTrackProvider::new("https://acme.youtrack.cloud", "t", "u");
+        let ev = p.to_event(&comment_activity(Some(
+            "https://acme.youtrack.cloud/issue/PAC-1#focus=Comments-4-17.0-0",
+        )));
+        assert_eq!(
+            ev.url.as_deref(),
+            Some("https://acme.youtrack.cloud/issue/PAC-1#focus=Comments-4-17.0-0")
+        );
+    }
+
+    /// Older cached activities and non-comment targets have no permalink, so
+    /// the issue link must still be produced.
+    #[test]
+    fn falls_back_to_the_issue_link_without_a_permalink() {
+        let p = YouTrackProvider::new("https://acme.youtrack.cloud", "t", "u");
+        let ev = p.to_event(&comment_activity(None));
+        assert_eq!(
+            ev.url.as_deref(),
+            Some("https://acme.youtrack.cloud/issue/PAC-1")
+        );
+    }
+
+    /// An empty string would otherwise win over the fallback and open nothing.
+    #[test]
+    fn empty_permalink_falls_back_rather_than_opening_nothing() {
+        let p = YouTrackProvider::new("https://acme.youtrack.cloud", "t", "u");
+        let ev = p.to_event(&comment_activity(Some("")));
+        assert_eq!(
+            ev.url.as_deref(),
+            Some("https://acme.youtrack.cloud/issue/PAC-1")
         );
     }
 }
