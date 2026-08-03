@@ -61,6 +61,10 @@ pub struct ActivityTarget {
     pub text: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
+    /// Permalink to this target, which YouTrack supplies for comments.
+    /// Absent on plain issue targets — they are addressed by `id_readable`.
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub project: Option<ActivityProject>,
     /// Parent issue when target is a comment, attachment, or VCS change.
@@ -123,7 +127,10 @@ pub const ACTIVITY_FIELDS: &str = concat!(
     "author(id,login,name,avatarUrl),",
     "timestamp,",
     "category(id),",
-    "target(id,idReadable,$type,text,summary,",
+    // `url` is the comment permalink, present on IssueComment/ArticleComment
+    // targets. Requesting it lets deep links land on the comment itself rather
+    // than the top of a long issue.
+    "target(id,idReadable,$type,text,summary,url,",
     "project(id,name,shortName),",
     "issue(id,idReadable,summary,project(id,name,shortName)),",
     "article(id,idReadable,summary,project(id,name,shortName))),",
