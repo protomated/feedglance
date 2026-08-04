@@ -1,12 +1,22 @@
 import { create } from "zustand";
 import { load } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
-import type { ActivityCategoryId } from "../types/activity";
+import type { EventKind } from "../types/event";
 import { migrateLegacyProjectKeys } from "../utils/projectFilter";
 
 const STORE_NAME = "filters.json";
 const KEY_PROJECTS = "selected_projects";
-const KEY_TYPES = "selected_types";
+/**
+ * Bumped from `selected_types` when type filtering moved from YouTrack category
+ * IDs to provider-independent `EventKind`s.
+ *
+ * A new key rather than an in-place migration: the two vocabularies are not
+ * 1:1. `CustomFieldCategory` alone covered assignment + statusChange + other,
+ * so expanding it would silently opt users into kinds they never chose. Reading
+ * the old key and translating is handled below, but only as a widening.
+ */
+const KEY_TYPES = "selected_kinds";
+const KEY_TYPES_LEGACY = "selected_types";
 const KEY_MUTED = "muted_issues";
 const KEY_ACCOUNTS = "selected_accounts";
 const KEY_VIEW_MODE = "view_mode";
@@ -17,8 +27,8 @@ export type ViewMode = "unread" | "all";
 interface FilterState {
   /** Selected project keys to show (empty = show all). */
   selectedProjects: Set<string>;
-  /** Selected activity category IDs to show (empty = show all). */
-  selectedTypes: Set<ActivityCategoryId>;
+  /** Selected event kinds to show (empty = show all). */
+  selectedTypes: Set<EventKind>;
   /** Muted issue IDs (always hidden). */
   mutedIssues: Set<string>;
   /** Selected account IDs to show (empty = show all). */
@@ -41,8 +51,8 @@ interface FilterState {
    */
   migrateProjectKeys: (knownKeysByAccount: Map<string, Set<string>>) => void;
   toggleProject: (projectKey: string) => void;
-  /** Toggle a category type filter. */
-  toggleType: (typeId: ActivityCategoryId) => void;
+  /** Toggle an event-kind filter. */
+  toggleType: (typeId: EventKind) => void;
   /** Toggle an account filter. */
   toggleAccount: (accountId: string) => void;
   /** Mute an issue by its readable ID. */
@@ -57,6 +67,32 @@ interface FilterState {
   toggleAssignedToMe: () => void;
   /** Clear all filters. */
   clearAll: () => void;
+}
+
+/**
+ * Translate a pre-upgrade `selected_types` selection into event kinds.
+ *
+ * Widening, deliberately: `CustomFieldCategory` was the only chip covering
+ * assignments, status changes and uncategorized updates, so a user who had it
+ * selected wanted all three. Narrowing to one would silently hide events they
+ * were previously seeing.
+ */
+function translateLegacyTypes(legacy: string[] | null | undefined): string[] | null {
+  if (!legacy || legacy.length === 0) return null;
+  const byCategory: Record<string, EventKind[]> = {
+    CommentsCategory: ["comment"],
+    CustomFieldCategory: ["assignment", "statusChange", "other"],
+    AttachmentsCategory: ["attachment"],
+    IssueCreatedCategory: ["itemCreated"],
+    IssueResolvedCategory: ["itemResolved"],
+    SprintCategory: ["sprint"],
+    VcsChangeCategory: ["vcsChange"],
+  };
+  const out = new Set<EventKind>();
+  for (const cat of legacy) {
+    for (const k of byCategory[cat] ?? []) out.add(k);
+  }
+  return out.size > 0 ? Array.from(out) : null;
 }
 
 let storeInstance: Awaited<ReturnType<typeof load>> | null = null;
@@ -79,7 +115,7 @@ async function syncMutedToBackend(muted: Set<string>) {
 
 async function persist(
   projects: Set<string>,
-  types: Set<ActivityCategoryId>,
+  types: Set<EventKind>,
   muted: Set<string>,
   accounts: Set<string>,
   viewMode: ViewMode,
@@ -98,7 +134,7 @@ async function persist(
 
 export const useFilterStore = create<FilterState>((set, get) => ({
   selectedProjects: new Set(),
-  selectedTypes: new Set(),
+  selectedTypes: new Set<EventKind>(),
   mutedIssues: new Set(),
   selectedAccounts: new Set(),
   searchQuery: "",
@@ -109,7 +145,9 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     try {
       const store = await getStore();
       const projects = await store.get<string[]>(KEY_PROJECTS);
-      const types = await store.get<string[]>(KEY_TYPES);
+      const kinds = await store.get<string[]>(KEY_TYPES);
+      // Fall back to the pre-EventKind selection on first run after upgrade.
+      const types = kinds ?? translateLegacyTypes(await store.get<string[]>(KEY_TYPES_LEGACY));
       const muted = await store.get<string[]>(KEY_MUTED);
       const accounts = await store.get<string[]>(KEY_ACCOUNTS);
       const viewMode = await store.get<ViewMode>(KEY_VIEW_MODE);
@@ -119,7 +157,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
         // Stored keys may still be legacy unscoped ones; `migrateProjectKeys`
         // upgrades them once activities are loaded and accounts are known.
         selectedProjects: new Set(projects ?? []),
-        selectedTypes: new Set((types ?? []) as ActivityCategoryId[]),
+        selectedTypes: new Set((types ?? []) as EventKind[]),
         mutedIssues: mutedSet,
         selectedAccounts: new Set(accounts ?? []),
         viewMode: viewMode === "all" ? "all" : "unread",
@@ -159,7 +197,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
     persist(next, s.selectedTypes, s.mutedIssues, s.selectedAccounts, s.viewMode, s.assignedToMeOnly);
   },
 
-  toggleType: (typeId: ActivityCategoryId) => {
+  toggleType: (typeId: EventKind) => {
     const s = get();
     const next = new Set(s.selectedTypes);
     if (next.has(typeId)) {
@@ -218,7 +256,7 @@ export const useFilterStore = create<FilterState>((set, get) => ({
 
   clearAll: () => {
     const empty = new Set<string>();
-    const emptyTypes = new Set<ActivityCategoryId>();
+    const emptyTypes = new Set<EventKind>();
     set({
       selectedProjects: empty,
       selectedTypes: emptyTypes,

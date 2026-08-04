@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { useFilterStore } from "../stores/filters";
 import { useAuthStore } from "../stores/auth";
 import { useNotificationStore } from "../stores/notifications";
-import type { ActivityCategoryId } from "../types/activity";
+import type { EventKind } from "../types/event";
+import { EVENT_KIND_LABELS } from "../types/event";
 import {
   projectKeyOfScopedKey,
   resolveProjectKey,
@@ -11,18 +12,25 @@ import {
   scopedProjectKey,
 } from "../utils/projectFilter";
 
-/** Human-readable labels for each activity category. */
-const CATEGORY_LABELS: Record<ActivityCategoryId, string> = {
-  CommentsCategory: "Comments",
-  CustomFieldCategory: "Field changes",
-  AttachmentsCategory: "Attachments",
-  IssueCreatedCategory: "Created",
-  IssueResolvedCategory: "Resolved",
-  SprintCategory: "Sprint",
-  VcsChangeCategory: "VCS",
-};
-
-const ALL_CATEGORIES: ActivityCategoryId[] = Object.keys(CATEGORY_LABELS) as ActivityCategoryId[];
+/**
+ * Filterable event kinds, in display order.
+ *
+ * Listed explicitly rather than derived from `EVENT_KIND_LABELS` so the chip
+ * order is intentional (most-used first) rather than object-key order. Every
+ * kind appears — including `other`, so that events from provider subtypes the
+ * app does not model yet are still filterable rather than stuck on screen.
+ */
+const ALL_KINDS: EventKind[] = [
+  "comment",
+  "assignment",
+  "statusChange",
+  "itemCreated",
+  "itemResolved",
+  "attachment",
+  "sprint",
+  "vcsChange",
+  "other",
+];
 
 interface ProjectEntry {
   shortName: string;
@@ -231,19 +239,19 @@ export function FilterBar() {
 
       {/* Category type toggles */}
       <div className="px-3 pb-2 flex flex-wrap gap-1">
-        {ALL_CATEGORIES.map((cat) => {
-          const active = selectedTypes.has(cat);
+        {ALL_KINDS.map((kind) => {
+          const active = selectedTypes.has(kind);
           return (
             <button
-              key={cat}
-              onClick={() => toggleType(cat)}
+              key={kind}
+              onClick={() => toggleType(kind)}
               className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
                 active
                   ? "bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-700"
                   : "bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 border border-transparent hover:bg-gray-200 dark:hover:bg-gray-600"
               }`}
             >
-              {CATEGORY_LABELS[cat]}
+              {EVENT_KIND_LABELS[kind]}
             </button>
           );
         })}

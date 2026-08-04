@@ -18,7 +18,7 @@ import { ToastContainer } from "./components/Toast";
 import { UpdateBanner, checkForUpdate } from "./components/UpdateBanner";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { ActivityItem } from "./types/activity";
-import { passesProjectFilter } from "./utils/projectFilter";
+import { passesKindFilter, passesProjectFilter } from "./utils/projectFilter";
 import "./App.css";
 
 type View = "feed" | "settings";
@@ -128,10 +128,7 @@ function App() {
         if (!selectedAccounts.has(a.accountId)) return false;
       }
       if (!passesProjectFilter(a, selectedProjects)) return false;
-      if (selectedTypes.size > 0) {
-        const cat = a.category?.id;
-        if (!cat || !selectedTypes.has(cat as any)) return false;
-      }
+      if (!passesKindFilter(a, selectedTypes)) return false;
       if (mutedIssues.size > 0) {
         const issueId = resolveIssueIdForFilter(a);
         if (issueId && mutedIssues.has(issueId)) return false;
