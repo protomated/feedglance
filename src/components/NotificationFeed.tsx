@@ -7,7 +7,7 @@ import { FilterBar } from "./FilterBar";
 import { EmptyState } from "./EmptyState";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ActivityItem } from "../types/activity";
-import { passesProjectFilter } from "../utils/projectFilter";
+import { passesKindFilter, passesProjectFilter } from "../utils/projectFilter";
 
 /** Best-effort: detect if an activity is an Assignee change whose `added` names a given user. */
 function isAssigneeChangeTo(activity: ActivityItem, userLogin: string | null, userId: string | null): boolean {
@@ -193,10 +193,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       if (!passesProjectFilter(a, selectedProjects)) return false;
 
       // Type filter (empty = show all)
-      if (selectedTypes.size > 0) {
-        const cat = a.category?.id;
-        if (!cat || !selectedTypes.has(cat as any)) return false;
-      }
+      if (!passesKindFilter(a, selectedTypes)) return false;
 
       // Muted issues
       if (mutedIssues.size > 0) {

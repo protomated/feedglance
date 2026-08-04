@@ -1,4 +1,5 @@
 import type { ActivityItem } from "../types/activity";
+import type { EventKind } from "../types/event";
 
 /**
  * Project-filter key helpers.
@@ -83,6 +84,30 @@ export function passesProjectFilter(
   if (!accountHasSelection) return true;
 
   return selectedProjects.has(activityProjectKey(activity));
+}
+
+/**
+ * Does this activity pass the event-kind filter?
+ *
+ * Keyed on `kind` rather than the legacy `category.id`, which cannot express
+ * the distinction: assignments, status changes and uncategorized updates all
+ * collapse into `CustomFieldCategory`, so a category-based filter could never
+ * separate "assigned to me" from "someone moved a deadline".
+ *
+ * Shared by the feed and the unread badge, which must agree exactly — when they
+ * drifted, the tray counted events the feed was not showing.
+ *
+ * An activity with no `kind` predates the field (restored from cache); it is
+ * kept rather than hidden, since silently dropping cached events looks like
+ * data loss.
+ */
+export function passesKindFilter(
+  activity: ActivityItem,
+  selectedKinds: Set<EventKind>,
+): boolean {
+  if (selectedKinds.size === 0) return true;
+  if (!activity.kind) return true;
+  return selectedKinds.has(activity.kind);
 }
 
 /**
