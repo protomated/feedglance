@@ -201,6 +201,24 @@ function describeActivity(activity: ActivityItem, currentUserLogin: string | nul
   if (categoryId === "CommentsCategory") {
     return { node: "commented", isAssignmentToMe: false, isUnassigned: false };
   }
+
+  // Providers that pre-render their own wording (Nifty) send no added/removed
+  // diff, so every branch below would fall through to "made a change". Use the
+  // provider's sentence instead — it is strictly more informative.
+  //
+  // `isAssignmentToMe` still has to be derived, since the highlight it drives
+  // cannot be read out of prose. `mentionsMe` is set upstream for exactly the
+  // direct-target case (assigned to you, or @-mentioned).
+  // The backend already resolves `<@userId>` tokens to display names
+  // (`resolve_mentions`), so this text is display-ready.
+  const rendered = activity.description?.trim();
+  if (rendered) {
+    return {
+      node: rendered,
+      isAssignmentToMe: categoryId === "CustomFieldCategory" && activity.mentionsMe === true,
+      isUnassigned: false,
+    };
+  }
   if (categoryId === "AttachmentsCategory") {
     return { node: "added an attachment", isAssignmentToMe: false, isUnassigned: false };
   }

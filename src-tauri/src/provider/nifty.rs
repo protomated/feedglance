@@ -194,8 +194,13 @@ impl NiftyMessage {
             Some("createTask") => EventKind::ItemCreated,
             Some("assignTask") | Some("unassignTask") => EventKind::Assignment,
             Some("completeTask") | Some("uncompleteTask") => EventKind::ItemResolved,
+            // Date changes ride alongside moves as status-ish updates.
+            // `addTaskStartDate` was observed live and previously fell through
+            // to `Other`; its siblings are included for symmetry with the
+            // deadline set, which Nifty names the same way.
             Some("moveTask") | Some("addTaskDeadline") | Some("removeTaskDeadline")
-            | Some("updateTaskDeadline") => EventKind::StatusChange,
+            | Some("updateTaskDeadline") | Some("addTaskStartDate")
+            | Some("removeTaskStartDate") | Some("updateTaskStartDate") => EventKind::StatusChange,
             Some("uploadFile") | Some("attachFile") => EventKind::Attachment,
             Some("addTaskToMilestone") | Some("removeTaskFromMilestone") => EventKind::Sprint,
             _ => EventKind::Other,
@@ -1246,6 +1251,45 @@ mod tests {
         assert_eq!(mk(Some("assignTask")).kind(), EventKind::Assignment);
         assert_eq!(mk(Some("moveTask")).kind(), EventKind::StatusChange);
         assert_eq!(mk(Some("wat")).kind(), EventKind::Other);
+        // Observed live and previously unmapped.
+        assert_eq!(mk(Some("addTaskStartDate")).kind(), EventKind::StatusChange);
+    }
+
+    /// Every non-comment subtype observed in a live workspace carries
+    /// pre-rendered `text` — that is the entire basis for the UI showing these
+    /// events, since Nifty sends no structured diff. If a subtype ever arrives
+    /// with empty text the feed silently regresses to "made a change", so the
+    /// mapping must keep `text` as the description source.
+    #[test]
+    fn non_comment_events_carry_prerendered_text() {
+        let d = directory(&[("CnAHALsDiDgBv", "Bo")]);
+        let p = NiftyProvider::new("t", "me");
+
+        // Verbatim payload shapes captured from the live API.
+        for (subtype, text, expected) in [
+            ("assignTask", "Assigned <@CnAHALsDiDgBv> to this task", "Assigned @Bo to this task"),
+            ("createTask", "Created this task", "Created this task"),
+            ("moveTask", "Moved this task from other project", "Moved this task from other project"),
+        ] {
+            let m = NiftyMessage {
+                id: "m".into(),
+                text: Some(text.into()),
+                subtype: Some(subtype.into()),
+                task: Some("t1".into()),
+                author: Some("someone".into()),
+                tagged: vec![],
+                seen_by: vec![],
+                created_at: Some("2024-07-29T20:40:01.721Z".into()),
+                is_deleted: false,
+            };
+            let ev = p.to_event(&m, None, None, &d);
+            assert_eq!(
+                ev.text.as_deref(),
+                Some(expected),
+                "{} lost its rendered description",
+                subtype
+            );
+        }
     }
 
     /// Live check against the real Nifty API. Ignored by default (needs

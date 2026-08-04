@@ -54,6 +54,11 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
       accountId: event.accountId,
       mentionsMe: event.mentionsMe,
       url: event.url,
+      // Carried for filtering. YouTrack rendering still reads `category.id`
+      // off the raw payload, but the filter needs the finer-grained kind —
+      // otherwise YouTrack assignments and status changes are as inseparable
+      // as Nifty's were.
+      kind: event.kind,
     };
   }
 
@@ -101,13 +106,21 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
     // added/removed diff to surface.
     added: null,
     removed: null,
-    field:
-      event.kind === "assignment"
-        ? { name: "Assignee" }
-        : event.kind === "statusChange"
-          ? { name: "State" }
-          : undefined,
+    // Deliberately NOT setting `field` for non-comment kinds.
+    //
+    // `field: { name: "Assignee" | "State" }` used to be set here, which routed
+    // these into `describeActivity`'s YouTrack field-diff branches. Those read
+    // the change out of `added`/`removed` — both null above — so an assignment
+    // rendered as "unassigned" and a status change as an empty diff. The
+    // pre-rendered `description` below is what these events actually carry.
+    field: undefined,
+    // Nifty's own wording for the change ("Assigned @Bo to this task", "Moved
+    // this task from other project"). Verified against a live workspace: every
+    // non-comment subtype populates `text`, so this is always the best
+    // description available — and the only one, given there is no diff.
+    description: !isComment ? (event.text ?? undefined) : undefined,
     activityType: event.provider,
+    kind: event.kind,
     accountId: event.accountId,
     mentionsMe: event.mentionsMe,
     url: event.url,
