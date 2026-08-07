@@ -29,3 +29,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 async-trait = "0.1.91"
 urlencoding = "2.1.3"
+# Already built as a Tauri dependency (image-png feature); declared directly so
+# the tray can composite an unread dot onto the icon on Windows and Linux, where
+# `set_title` is a no-op. Default features off — only PNG decode is needed.
+image = { version = "0.25", default-features = false, features = ["png"] }

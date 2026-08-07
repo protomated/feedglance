@@ -16,6 +16,10 @@ const INTERVAL_FOCUSED: u64 = 30;
 const INTERVAL_MINIMIZED: u64 = 60;
 const INTERVAL_IDLE: u64 = 120;
 
+/// How long unfocused before dropping to the idle tier. Matches the 5 minutes
+/// the frontend timer used to (attempt to) enforce.
+const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
+
 /// Per-cycle API call budget handed to each provider.
 ///
 /// YouTrack ignores this (one call per cycle). Nifty uses it to bound fan-out:
@@ -136,10 +140,149 @@ impl AccountPollingState {
     }
 }
 
+/// The feed's client-side filters, mirrored backend-side.
+///
+/// The tray badge must match what the feed shows, but the badge has to stay
+/// correct while the window is hidden — and a hidden webview is throttled or
+/// suspended by the OS (aggressively so on Windows and Linux), so anything
+/// computed in the frontend stops updating exactly when the app is in its normal
+/// state: closed in the tray.
+///
+/// So the filters are pushed down once whenever they change, and the count is
+/// computed here on every poll. Empty means "no filter", matching the frontend's
+/// `size === 0` convention — a fresh install filters nothing.
+#[derive(Debug, Default, Clone)]
+pub struct FeedFilters {
+    pub accounts: HashSet<String>,
+    /// Account-scoped project keys, as built by the frontend.
+    pub projects: HashSet<String>,
+    pub kinds: HashSet<String>,
+    pub search: String,
+    pub assigned_to_me_only: bool,
+}
+
+/// Separator in scoped project keys. Must match `SEP` in `projectFilter.ts`.
+const PROJECT_KEY_SEP: &str = "::";
+
+/// Scoped project key for an event, mirroring `activityProjectKey`.
+///
+/// The frontend resolves the bare key as `shortName ?? id ?? "unknown"`, and
+/// `compat.ts` maps `shortName` from `subject.projectName` — so the precedence
+/// here is projectName, then projectId, then the literal "unknown" that the
+/// frontend uses for events with no project at all.
+fn event_project_key(event: &NormalizedEvent) -> String {
+    let bare = event
+        .subject
+        .project_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(event
+            .subject
+            .project_id
+            .as_deref()
+            .filter(|s| !s.is_empty()))
+        .unwrap_or("unknown");
+    format!("{}{}{}", event.account_id, PROJECT_KEY_SEP, bare)
+}
+
+impl FeedFilters {
+    /// Mirrors `flatActivities` in App.tsx. The two must agree, or the badge
+    /// disagrees with the feed the user sees.
+    fn allows(&self, event: &NormalizedEvent, current_user_id: &str) -> bool {
+        // Own actions are hidden unless they mention you.
+        if !current_user_id.is_empty() && !event.mentions_me {
+            if let Some(actor) = &event.actor {
+                if actor.id == current_user_id {
+                    return false;
+                }
+            }
+        }
+        if !self.accounts.is_empty()
+            && !event.account_id.is_empty()
+            && !self.accounts.contains(&event.account_id)
+        {
+            return false;
+        }
+        // Project keys are `{accountId}::{projectKey}`, where projectKey is the
+        // project's shortName falling back to its id — the frontend's format,
+        // mirrored exactly. `event_project_key` reproduces it.
+        //
+        // A selection only constrains the accounts it names: if nothing is
+        // selected for this event's account, that account is unfiltered. This
+        // matches `passesProjectFilter`; without it, filtering one account would
+        // silently drop every other account's events from the badge while the
+        // feed still showed them.
+        if !self.projects.is_empty() {
+            let account_has_selection = self
+                .projects
+                .iter()
+                .any(|k| k.split(PROJECT_KEY_SEP).next().unwrap_or("") == event.account_id);
+            if account_has_selection && !self.projects.contains(&event_project_key(event)) {
+                return false;
+            }
+        }
+        if !self.kinds.is_empty() {
+            let kind = serde_json::to_value(event.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            if !kind.is_empty() && !self.kinds.contains(&kind) {
+                return false;
+            }
+        }
+        if !self.search.is_empty() {
+            let needle = self.search.to_lowercase();
+            // Same fields `matchesSearch` scans: author name, item id, title,
+            // and body text.
+            let hay = [
+                event.text.as_deref().unwrap_or(""),
+                event.subject.title.as_deref().unwrap_or(""),
+                &event.subject.display_id,
+                event.actor.as_ref().map(|a| a.name.as_str()).unwrap_or(""),
+                event.actor.as_ref().map(|a| a.id.as_str()).unwrap_or(""),
+            ]
+            .join(" ")
+            .to_lowercase();
+            if !hay.contains(&needle) {
+                return false;
+            }
+        }
+        // Mirrors `isAssigneeChangeTo`: an assignment whose `added` names the
+        // current user. Deliberately NOT satisfied by `mentions_me` — the
+        // frontend's version does not accept mentions, and treating it as a
+        // match would over-count the badge relative to the feed.
+        if self.assigned_to_me_only {
+            if event.kind != EventKind::Assignment || current_user_id.is_empty() {
+                return false;
+            }
+            let names_me = |v: &serde_json::Value| {
+                v.get("id").and_then(|x| x.as_str()) == Some(current_user_id)
+                    || v.get("login").and_then(|x| x.as_str()) == Some(current_user_id)
+            };
+            let matched = match event.raw.get("added") {
+                Some(serde_json::Value::Array(a)) => a.iter().any(names_me),
+                Some(v @ serde_json::Value::Object(_)) => names_me(v),
+                _ => false,
+            };
+            if !matched {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// Manager holding all account polling states and global focus state.
 pub struct PollingManager {
     pub accounts: HashMap<String, AccountPollingState>,
     pub focus_state: FocusState,
+    /// When the app last became unfocused, used to promote Minimized -> Idle in
+    /// the polling loop rather than via a frontend timer that a hidden webview
+    /// may never run. `None` while focused.
+    pub unfocused_since: Option<std::time::Instant>,
+    /// Mirror of the feed's filters, so the badge can be computed without the
+    /// webview. See `FeedFilters`.
+    pub filters: FeedFilters,
 }
 
 impl PollingManager {
@@ -147,6 +290,22 @@ impl PollingManager {
         Self {
             accounts: HashMap::new(),
             focus_state: FocusState::Focused,
+            unfocused_since: None,
+            filters: FeedFilters::default(),
+        }
+    }
+
+    /// Effective polling tier, promoting Minimized -> Idle once the app has been
+    /// unfocused long enough.
+    ///
+    /// Owned here rather than in the frontend because the window is hidden on
+    /// blur, and a hidden webview's timers are unreliable on Windows and Linux.
+    pub fn effective_focus_state(&self) -> FocusState {
+        match (self.focus_state, self.unfocused_since) {
+            (FocusState::Minimized, Some(since)) if since.elapsed() >= IDLE_AFTER => {
+                FocusState::Idle
+            }
+            (state, _) => state,
         }
     }
 
@@ -179,6 +338,38 @@ impl PollingManager {
             })
             .sum()
     }
+
+    /// Unread count as the *feed* would show it — the number the tray badge
+    /// must display.
+    ///
+    /// Unlike `total_unread_count`, this applies the mirrored feed filters and
+    /// per-account mutes, so a user filtering to one project sees a badge for
+    /// that project rather than the whole workspace.
+    pub fn filtered_unread_count(&self) -> u32 {
+        self.accounts
+            .values()
+            .map(|a| {
+                a.events
+                    .iter()
+                    .filter(|e| {
+                        let unread = match e.seen_remotely {
+                            Some(seen) => !seen,
+                            None => !a.read_ids.contains(&e.id),
+                        };
+                        if !unread {
+                            return false;
+                        }
+                        if !e.subject.display_id.is_empty()
+                            && a.muted_issues.contains(&e.subject.display_id)
+                        {
+                            return false;
+                        }
+                        self.filters.allows(e, &a.current_user_id)
+                    })
+                    .count() as u32
+            })
+            .sum()
+    }
 }
 
 pub type SharedPollingState = Arc<RwLock<PollingManager>>;
@@ -200,7 +391,7 @@ pub fn start_polling_loop(app_handle: AppHandle, state: SharedPollingState, _can
         loop {
             let (targets, interval_secs, max_failures) = {
                 let mgr = state.read().await;
-                let base = mgr.focus_state.interval_secs();
+                let base = mgr.effective_focus_state().interval_secs();
                 let mut targets = Vec::new();
                 let mut max_failures = 0u32;
 
@@ -248,6 +439,37 @@ pub fn start_polling_loop(app_handle: AppHandle, state: SharedPollingState, _can
                     Ok(result) => {
                         let outcome = apply_events(&state, &target, result).await;
                         let Some(outcome) = outcome else { continue };
+
+                        // The badge is computed here, not in the webview: while
+                        // the window is hidden the frontend is throttled and its
+                        // listener may not run for minutes, which left the badge
+                        // stale exactly when the app lives in the tray.
+                        //
+                        // Recomputed even on a zero-event cycle, since read
+                        // state can change from the tray menu meanwhile.
+                        let unread = {
+                            let mgr = state.read().await;
+                            mgr.filtered_unread_count()
+                        };
+                        crate::tray::update_tray_badge(&app_handle, unread);
+
+                        // Nothing new means nothing for the UI to redraw. The
+                        // emit wakes the webview and triggers a full refresh
+                        // round-trip, so skipping it keeps an idle app idle —
+                        // the common case by far.
+                        //
+                        // Both notification paths below are fed only by events
+                        // counted in `new_count`, so skipping here cannot drop
+                        // an alert. Asserted rather than assumed: if that ever
+                        // stops holding, this must move below the notifications.
+                        if outcome.new_count == 0 {
+                            debug_assert!(
+                                outcome.notifiable_count == 0 && outcome.assigned_to_me.is_empty(),
+                                "no new events but notifications pending — \
+                                 the early-continue would swallow them"
+                            );
+                            continue;
+                        }
 
                         let _ = app_handle.emit(
                             "activities-updated",
@@ -421,6 +643,248 @@ fn send_batch_notification(app_handle: &AppHandle, count: u32, provider: Provide
 mod tests {
     use super::*;
     use crate::provider::{EventSubject, NormalizedEvent};
+
+    fn ev(id: &str, account: &str, project: Option<&str>, kind: EventKind) -> NormalizedEvent {
+        NormalizedEvent {
+            id: id.into(),
+            provider: ProviderKind::Nifty,
+            timestamp: 1,
+            kind,
+            actor: None,
+            subject: EventSubject {
+                id: "t1".into(),
+                display_id: "P-1".into(),
+                title: Some("Fix the thing".into()),
+                project_id: project.map(String::from),
+                project_name: None,
+            },
+            text: Some("hello world".into()),
+            mentions_me: false,
+            seen_remotely: None,
+            url: None,
+            account_id: account.into(),
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    /// A fresh install filters nothing — an empty set must mean "allow all",
+    /// matching the frontend's `size === 0` convention. Inverting this would
+    /// blank the feed and the badge on first run.
+    #[test]
+    fn empty_filters_allow_everything() {
+        let f = FeedFilters::default();
+        assert!(f.allows(&ev("e1", "a1", Some("p1"), EventKind::Comment), ""));
+    }
+
+    #[test]
+    fn account_filter_excludes_other_accounts() {
+        let mut f = FeedFilters::default();
+        f.accounts.insert("a1".into());
+        assert!(f.allows(&ev("e1", "a1", None, EventKind::Comment), ""));
+        assert!(!f.allows(&ev("e2", "a2", None, EventKind::Comment), ""));
+    }
+
+    /// Project keys are account-scoped (`account::project`) — the same project
+    /// in two accounts must not cross-match. Note account a2 has no selection
+    /// at all here, so it stays unfiltered (see the test below).
+    #[test]
+    fn project_filter_is_account_scoped() {
+        let mut f = FeedFilters::default();
+        f.projects.insert("a1::p1".into());
+        f.projects.insert("a2::other".into());
+        assert!(f.allows(&ev("e1", "a1", Some("p1"), EventKind::Comment), ""));
+        assert!(!f.allows(&ev("e2", "a2", Some("p1"), EventKind::Comment), ""));
+    }
+
+    /// A selection constrains only the accounts it names. Filtering account a1
+    /// must not silently hide every event from a2 — the frontend's
+    /// `accountHasSelection` escape hatch, which the badge has to reproduce or
+    /// it disagrees with the visible feed.
+    #[test]
+    fn project_filter_leaves_unselected_accounts_alone() {
+        let mut f = FeedFilters::default();
+        f.projects.insert("a1::p1".into());
+        assert!(
+            f.allows(&ev("e2", "a2", Some("anything"), EventKind::Comment), ""),
+            "an account with no project selected must stay unfiltered"
+        );
+    }
+
+    /// The bare key is `projectName ?? projectId ?? "unknown"` — `compat.ts`
+    /// maps the frontend's `shortName` from `projectName`, so a name-bearing
+    /// event keys on the name, not the id.
+    #[test]
+    fn project_key_prefers_name_then_id_then_unknown() {
+        let mut e = ev("e1", "a1", Some("p_id"), EventKind::Comment);
+        e.subject.project_name = Some("PROJ".into());
+        assert_eq!(event_project_key(&e), "a1::PROJ");
+
+        e.subject.project_name = None;
+        assert_eq!(event_project_key(&e), "a1::p_id");
+
+        e.subject.project_id = None;
+        assert_eq!(event_project_key(&e), "a1::unknown");
+    }
+
+    /// Kind names must match the wire format the frontend filters on
+    /// (`camelCase` via serde), not Rust's variant spelling.
+    #[test]
+    fn kind_filter_matches_serialized_names() {
+        let mut f = FeedFilters::default();
+        f.kinds.insert("statusChange".into());
+        assert!(f.allows(&ev("e1", "a1", None, EventKind::StatusChange), ""));
+        assert!(!f.allows(&ev("e2", "a1", None, EventKind::Comment), ""));
+    }
+
+    #[test]
+    fn search_is_case_insensitive_across_fields() {
+        let mut f = FeedFilters::default();
+        f.search = "THING".into();
+        assert!(f.allows(&ev("e1", "a1", None, EventKind::Comment), ""));
+        f.search = "absent".into();
+        assert!(!f.allows(&ev("e2", "a1", None, EventKind::Comment), ""));
+    }
+
+    /// Own actions are hidden unless they mention you — the same rule the
+    /// providers apply upstream, mirrored so the badge agrees with the feed.
+    #[test]
+    fn own_events_are_excluded_unless_they_mention_me() {
+        let f = FeedFilters::default();
+        let mut e = ev("e1", "a1", None, EventKind::Comment);
+        e.actor = Some(crate::provider::EventActor {
+            id: "me".into(),
+            name: "Me".into(),
+            avatar_url: String::new(),
+        });
+        assert!(!f.allows(&e, "me"));
+        e.mentions_me = true;
+        assert!(f.allows(&e, "me"));
+        // With no known user id there is nobody to exclude.
+        e.mentions_me = false;
+        assert!(f.allows(&e, ""));
+    }
+
+    /// `assignedToMeOnly` mirrors `isAssigneeChangeTo`, which requires an
+    /// assignment naming the user in `added`. A mention alone must NOT satisfy
+    /// it, or the badge over-counts relative to the feed.
+    #[test]
+    fn assigned_to_me_requires_an_assignment_not_a_mention() {
+        let mut f = FeedFilters::default();
+        f.assigned_to_me_only = true;
+
+        let mut mention = ev("e1", "a1", None, EventKind::Comment);
+        mention.mentions_me = true;
+        assert!(!f.allows(&mention, "me"), "a mention is not an assignment");
+
+        let mut assigned = ev("e2", "a1", None, EventKind::Assignment);
+        assigned.raw = serde_json::json!({ "added": [{ "id": "me" }] });
+        assert!(f.allows(&assigned, "me"));
+
+        // An assignment to somebody else must not match.
+        let mut other = ev("e3", "a1", None, EventKind::Assignment);
+        other.raw = serde_json::json!({ "added": [{ "id": "someone" }] });
+        assert!(!f.allows(&other, "me"));
+    }
+
+    /// Both the array and bare-object shapes of `added` occur in YouTrack
+    /// payloads, and `login` is matched as well as `id`.
+    #[test]
+    fn assigned_to_me_handles_object_shape_and_login() {
+        let mut f = FeedFilters::default();
+        f.assigned_to_me_only = true;
+
+        let mut obj = ev("e1", "a1", None, EventKind::Assignment);
+        obj.raw = serde_json::json!({ "added": { "login": "me" } });
+        assert!(f.allows(&obj, "me"));
+    }
+
+    /// Regression guard for the tray badge: the count must reflect filters and
+    /// mutes, or it disagrees with the feed the user is looking at.
+    #[test]
+    fn filtered_unread_count_respects_filters_read_state_and_mutes() {
+        let mut mgr = PollingManager::new();
+        let mut acct = AccountPollingState::with_provider(
+            ProviderKind::Nifty,
+            String::new(),
+            "t".into(),
+            String::new(),
+        );
+        acct.events = vec![
+            ev("e1", "a1", Some("p1"), EventKind::Comment),
+            ev("e2", "a1", Some("p2"), EventKind::Comment),
+            ev("e3", "a1", Some("p1"), EventKind::Comment),
+        ];
+        acct.read_ids.insert("e3".into());
+        mgr.accounts.insert("a1".into(), acct);
+
+        assert_eq!(mgr.filtered_unread_count(), 2, "e3 is read");
+
+        mgr.filters.projects.insert("a1::p1".into());
+        assert_eq!(mgr.filtered_unread_count(), 1, "only e1 survives the filter");
+
+        mgr.accounts
+            .get_mut("a1")
+            .unwrap()
+            .muted_issues
+            .insert("P-1".into());
+        assert_eq!(mgr.filtered_unread_count(), 0, "muted issues do not count");
+    }
+
+    /// Server-side read state wins over the local set where a provider has it.
+    #[test]
+    fn seen_remotely_overrides_local_read_state() {
+        let mut mgr = PollingManager::new();
+        let mut acct = AccountPollingState::with_provider(
+            ProviderKind::Nifty,
+            String::new(),
+            "t".into(),
+            String::new(),
+        );
+        let mut e = ev("e1", "a1", None, EventKind::Comment);
+        e.seen_remotely = Some(true);
+        acct.events = vec![e];
+        mgr.accounts.insert("a1".into(), acct);
+        assert_eq!(mgr.filtered_unread_count(), 0);
+    }
+
+    /// The idle tier must be reachable without the frontend: the window is
+    /// hidden on blur and a hidden webview's timers are unreliable, which is
+    /// what left polling pinned at the faster minimized rate.
+    #[test]
+    fn minimized_promotes_to_idle_after_the_threshold() {
+        let mut mgr = PollingManager::new();
+        assert_eq!(mgr.effective_focus_state(), FocusState::Focused);
+
+        mgr.focus_state = FocusState::Minimized;
+        mgr.unfocused_since = Some(std::time::Instant::now());
+        assert_eq!(
+            mgr.effective_focus_state(),
+            FocusState::Minimized,
+            "must not promote immediately"
+        );
+
+        mgr.unfocused_since = std::time::Instant::now().checked_sub(IDLE_AFTER);
+        assert_eq!(
+            mgr.effective_focus_state(),
+            FocusState::Idle,
+            "should drop to the idle tier once the threshold passes"
+        );
+        assert_eq!(mgr.effective_focus_state().interval_secs(), INTERVAL_IDLE);
+    }
+
+    /// Focus must win immediately — a user opening the window should not keep
+    /// polling at the idle rate.
+    #[test]
+    fn focus_resets_the_idle_promotion() {
+        let mut mgr = PollingManager::new();
+        mgr.focus_state = FocusState::Focused;
+        mgr.unfocused_since = None;
+        assert_eq!(mgr.effective_focus_state(), FocusState::Focused);
+        assert_eq!(
+            mgr.effective_focus_state().interval_secs(),
+            INTERVAL_FOCUSED
+        );
+    }
 
     fn event(kind: EventKind, mentions_me: bool, added: serde_json::Value) -> NormalizedEvent {
         NormalizedEvent {

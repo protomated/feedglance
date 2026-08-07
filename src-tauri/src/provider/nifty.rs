@@ -11,7 +11,32 @@
 //! - `GET /messages?task_id=` *is* the de-facto activity feed: entries carry
 //!   `subtype` (`createTask`, `assignTask`, `moveTask`, `addTaskDeadline`, …),
 //!   `updated_at`, `seen_by`, and `tagged`.
-//! - `messages?project_id=` returns 400 — messages are per-task only.
+//! - `messages?project_id=` returns 400 — but that is the wrong *parameter*, not
+//!   proof that only tasks have messages. Project discussions are reachable via
+//!   `messages?chat_id=`; see "Project discussions" below.
+//!
+//! ## Project discussions
+//!
+//! Each project carries `general_discussion`, the chat ID of its discussion
+//! channel, and `GET /messages?chat_id={id}` returns that thread in the same
+//! message shape as tasks (differing only in `chat` replacing `task`).
+//!
+//! There is **no cheap change signal** for discussions, verified live:
+//!
+//! - Discussion chats are absent from `GET /chats` entirely — it lists only DMs,
+//!   so they cannot be enumerated or diffed there.
+//! - `GET /chats/{id}` does return the chat with `last_message_at`, but that
+//!   field is unreliable in *both* directions: one project reported a timestamp
+//!   a day older than its own newest message (a real message would be missed),
+//!   while three empty discussions reported recent timestamps (fetching forever
+//!   for nothing). It tracks the chat object, not its messages.
+//! - Nothing on the project payload moves when a message is posted.
+//!
+//! So discussions cost one unconditional call each. To keep that from scaling
+//! with project count, they are polled on a **rotation**: at most
+//! `DISCUSSIONS_PER_CYCLE` per cycle, resuming where the last cycle stopped, and
+//! only after task fan-out has taken its share. Every discussion is still
+//! visited — just not all in the same cycle.
 //!
 //! Naive fan-out is therefore `1 + projects + tasks` calls per cycle. Measured on
 //! a 4-project / 101-task workspace that is ~106 calls against a 200 GET/min
@@ -50,6 +75,38 @@ const PAGE_SIZE: u32 = 200;
 /// Messages fetched per changed task.
 const MESSAGES_PER_TASK: u32 = 20;
 
+/// Messages fetched per project discussion.
+const MESSAGES_PER_DISCUSSION: u32 = 20;
+
+/// Discussions polled per cycle, resuming via `discussion_rotation`.
+///
+/// Discussions have no change signal, so each costs a call whether or not
+/// anything was said. Capping the per-cycle count keeps that bounded on
+/// workspaces with many projects; at a 60s floor a 40-project workspace still
+/// sees every discussion within ~2 minutes.
+const DISCUSSIONS_PER_CYCLE: usize = 6;
+
+/// Marks a subject ID as a project discussion rather than a task.
+///
+/// The quick-action path (`ActionSource::comment`) receives only an opaque item
+/// ID, with no room for a subject *type*. Encoding it in the ID lets a reply be
+/// routed to `chat_id` instead of `task_id` without threading a new parameter
+/// through the trait, the Tauri command, and the frontend.
+///
+/// Nifty IDs are opaque and may contain `!` and `_`, but never `:` — verified
+/// across every task, project, chat, and message ID in a live workspace — so
+/// this cannot collide with a real ID.
+pub(crate) const DISCUSSION_ID_PREFIX: &str = "chat:";
+
+/// Calls held back from task fan-out so phase 3 can always run.
+///
+/// Without this, discussions are starved outright on any workspace whose task
+/// backlog saturates `budget` — verified live: three consecutive cycles spent
+/// 120/120 calls on tasks and left the discussion rotation pinned at 0, so no
+/// discussion was ever polled. Tasks give up a few calls per cycle and drain
+/// one cycle later; discussions go from never to always.
+const DISCUSSION_RESERVE: u32 = DISCUSSIONS_PER_CYCLE as u32;
+
 /// Nifty's limit is 200 GET/min and is team-scoped — shared across every user of
 /// this app in the same workspace. Stay well under it so N clients coexist.
 ///
@@ -84,6 +141,37 @@ struct NiftyProject {
     archived: bool,
     #[serde(default)]
     removed: bool,
+    /// Chat ID of the project's discussion channel. Absent on projects with the
+    /// discussion module switched off.
+    #[serde(default)]
+    general_discussion: Option<String>,
+    /// User has muted the discussion in Nifty's own UI; respected so the app
+    /// does not notify for a channel Nifty itself stays quiet about.
+    #[serde(default)]
+    general_discussion_muted: bool,
+    /// Which project modules are switched on. `discussion` absent means the
+    /// channel is disabled even when `general_discussion` still holds an ID.
+    #[serde(default)]
+    enabled_modules: Vec<String>,
+}
+
+impl NiftyProject {
+    /// The discussion chat to poll, or `None` when there is nothing to poll.
+    fn discussion_chat(&self) -> Option<&str> {
+        if self.general_discussion_muted {
+            return None;
+        }
+        // An empty `enabled_modules` means the payload omitted it rather than
+        // that every module is off — don't silently disable discussions then.
+        if !self.enabled_modules.is_empty()
+            && !self.enabled_modules.iter().any(|m| m == "discussion")
+        {
+            return None;
+        }
+        self.general_discussion
+            .as_deref()
+            .filter(|id| !id.is_empty())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +252,9 @@ struct NiftyMessage {
     subtype: Option<String>,
     #[serde(default)]
     task: Option<String>,
+    /// Parent chat, present on project-discussion messages in place of `task`.
+    #[serde(default)]
+    chat: Option<String>,
     #[serde(default)]
     author: Option<String>,
     #[serde(default)]
@@ -203,6 +294,10 @@ impl NiftyMessage {
             | Some("removeTaskStartDate") | Some("updateTaskStartDate") => EventKind::StatusChange,
             Some("uploadFile") | Some("attachFile") => EventKind::Attachment,
             Some("addTaskToMilestone") | Some("removeTaskFromMilestone") => EventKind::Sprint,
+            // Discussion-channel membership events, observed live on
+            // `messages?chat_id=`. Closest to "something was created" in the
+            // shared taxonomy; without this they fall through to `Other`.
+            Some("joinProject") | Some("leaveProject") => EventKind::ItemCreated,
             _ => EventKind::Other,
         }
     }
@@ -218,6 +313,11 @@ struct NiftyCursorState {
     /// Draining this first keeps a burst from starving later cycles.
     #[serde(default)]
     pending: Vec<String>,
+    /// Index into the project list where the next discussion sweep resumes.
+    /// Discussions have no change signal, so they are polled round-robin rather
+    /// than all at once; this is what makes the rotation resume across cycles.
+    #[serde(default)]
+    discussion_rotation: usize,
 }
 
 pub struct NiftyProvider {
@@ -271,6 +371,22 @@ impl NiftyProvider {
             "{}/{}/task/{}",
             self.workspace_url, project_id, task_id
         ))
+    }
+
+    /// Deep link for a project's discussion channel.
+    ///
+    /// The path segment matches the module name the API itself uses in
+    /// `enabled_modules` (`discussion`). Unlike `task_url`, this route is NOT
+    /// browser-verified: Nifty is a SPA and answers 200 for any path, so a
+    /// fetch cannot distinguish a real route from a client-side 404. If users
+    /// report discussion links landing on an empty page, check the real route
+    /// in the Nifty UI — the event itself is unaffected.
+    fn discussion_url(&self, project_id: Option<&str>) -> Option<String> {
+        let project_id = project_id?;
+        if self.workspace_url.is_empty() || project_id.is_empty() {
+            return None;
+        }
+        Some(format!("{}/{}/discussion", self.workspace_url, project_id))
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {
@@ -419,6 +535,20 @@ impl NiftyProvider {
         Ok(r.messages)
     }
 
+    /// Phase 3 — pull one project's discussion channel.
+    ///
+    /// Same endpoint and payload shape as tasks, keyed by `chat_id`.
+    async fn fetch_discussion(&self, chat_id: &str) -> Result<Vec<NiftyMessage>, ProviderError> {
+        let r: MessagesResponse = self
+            .get(&format!(
+                "messages?chat_id={}&limit={}",
+                urlencoding::encode(chat_id),
+                MESSAGES_PER_DISCUSSION
+            ))
+            .await?;
+        Ok(r.messages)
+    }
+
     /// Replace Nifty's `<@userId>` mention tokens with display names.
     ///
     /// Message bodies embed raw IDs (`<@fo_OWHEm!UvNxf> is this the case?`),
@@ -474,34 +604,79 @@ impl NiftyProvider {
             .or_else(|| task.map(|t| t.id.clone()))
             .unwrap_or_default();
 
-        let display_id = task
-            .and_then(|t| t.nice_id.clone())
-            .unwrap_or_else(|| task_id.clone());
+        // A discussion message has no task — its subject is the project itself.
+        // Keying it on the task ID would produce an event with an empty subject
+        // and no deep link, so the two shapes are built separately.
+        let is_discussion = task_id.is_empty() && msg.chat.is_some();
 
-        let subject = EventSubject {
-            id: task_id,
-            display_id,
-            title: task.and_then(|t| t.name.clone()),
-            project_id: project.map(|p| p.id.clone()),
-            project_name: project
-                .and_then(|p| p.name.clone().or_else(|| p.nice_id.clone())),
+        let subject = if is_discussion {
+            let project_name = project
+                .and_then(|p| p.name.clone().or_else(|| p.nice_id.clone()));
+            EventSubject {
+                // Prefixed with the chat ID so a reply can be routed back to
+                // `chat_id` rather than `task_id`. The quick-action path carries
+                // only an opaque item ID, so the routing information has to live
+                // in the ID itself; `comment()` splits it back apart.
+                id: msg
+                    .chat
+                    .as_deref()
+                    .map(|c| format!("{}{}", DISCUSSION_ID_PREFIX, c))
+                    .unwrap_or_default(),
+                display_id: project
+                    .and_then(|p| p.nice_id.clone())
+                    .or_else(|| project_name.clone())
+                    .unwrap_or_default(),
+                // The feed groups by subject; naming it "Discussion" is what
+                // distinguishes a project's discussion from its tasks.
+                title: Some(match project_name.as_deref() {
+                    Some(n) => format!("{} · Discussion", n),
+                    None => "Discussion".to_string(),
+                }),
+                project_id: project.map(|p| p.id.clone()),
+                project_name,
+            }
+        } else {
+            EventSubject {
+                display_id: task
+                    .and_then(|t| t.nice_id.clone())
+                    .unwrap_or_else(|| task_id.clone()),
+                id: task_id,
+                title: task.and_then(|t| t.name.clone()),
+                project_id: project.map(|p| p.id.clone()),
+                project_name: project
+                    .and_then(|p| p.name.clone().or_else(|| p.nice_id.clone())),
+            }
         };
 
         let mentions_me = !self.current_user_id.is_empty()
             && msg.tagged.iter().any(|t| t == &self.current_user_id);
 
-        // `seen_by` exists on the payload but is NOT usable as read state:
-        // verified empty across every message in a live workspace, including
-        // ones read in the Nifty UI. There is also no endpoint to mark a
-        // message read, so it could not be written back regardless.
+        // `seen_by` IS populated — an earlier note here claimed it was always
+        // empty, which re-probing disproved: 15 of 26 sampled task messages had
+        // a non-empty `seen_by`, 10 of them containing the current user, and
+        // discussion messages behave the same way.
         //
-        // Reporting `None` keeps read state local, same as YouTrack. Do not
-        // "fix" this by reading `msg.seen_by` without re-verifying that Nifty
-        // actually populates it — a false `Some(true)` silently marks
-        // everything read and the feed goes permanently quiet.
+        // It still is not wired up, for a different reason: read state is
+        // one-way. Every mark-read route 404s — `PUT|POST /messages/{id}/seen`,
+        // `/messages/{id}/read`, `/messages/seen`, `PUT|POST /chats/{id}/seen`
+        // — and `PUT /messages/{id}` with `{"seen": true}` returns 500 while
+        // leaving `seen_by` unchanged. So the app could read Nifty's read state
+        // but never write its own back, and the two would diverge the moment a
+        // user marked anything read here.
+        //
+        // Reporting `None` keeps read state local and self-consistent, same as
+        // YouTrack. Surfacing `seen_by` is defensible *only* alongside a
+        // one-way-sync story for that divergence; a naive `Some(true)` marks
+        // everything already-read on first poll and the feed goes silent.
         let seen_remotely = None;
 
-        let url = self.task_url(subject.project_id.as_deref(), &subject.id);
+        // Discussion subjects carry a `chat:`-prefixed ID, so the task route
+        // must not be built from it.
+        let url = if is_discussion {
+            self.discussion_url(subject.project_id.as_deref())
+        } else {
+            self.task_url(subject.project_id.as_deref(), &subject.id)
+        };
 
         NormalizedEvent {
             id: format!("nifty:{}", msg.id),
@@ -541,6 +716,7 @@ impl serde::Serialize for NiftyMessage {
         m.serialize_entry("text", &self.text)?;
         m.serialize_entry("subtype", &self.subtype)?;
         m.serialize_entry("task", &self.task)?;
+        m.serialize_entry("chat", &self.chat)?;
         m.serialize_entry("author", &self.author)?;
         m.serialize_entry("tagged", &self.tagged)?;
         m.serialize_entry("createdAt", &self.created_at)?;
@@ -577,6 +753,16 @@ impl NotificationSource for NiftyProvider {
 
         let is_initial = cursor.watermark == 0;
 
+        // Budget tasks may spend, holding back enough for phase 3. Reserving up
+        // front is what keeps a saturated task backlog from starving
+        // discussions entirely; see DISCUSSION_RESERVE.
+        //
+        // The reserve is capped at a quarter of the budget so a small budget is
+        // not dominated by it — with `budget: 15` a flat reserve would hand a
+        // third of the cycle to discussions and stall the cold-start task drain.
+        let reserve = DISCUSSION_RESERVE.min(budget / 4);
+        let task_budget = budget.saturating_sub(reserve);
+
         // --- Phase 1: cheap sweep -------------------------------------------
         let projects = self.list_projects().await?;
         calls += 1;
@@ -587,10 +773,12 @@ impl NotificationSource for NiftyProvider {
         let mut next_fingerprints: HashMap<String, String> = HashMap::new();
 
         for p in &projects {
-            if calls >= budget {
+            if calls >= task_budget {
                 break;
             }
-            let (tasks, used) = self.sweep_project(&p.id, budget.saturating_sub(calls)).await?;
+            let (tasks, used) = self
+                .sweep_project(&p.id, task_budget.saturating_sub(calls))
+                .await?;
             calls += used;
 
             for t in tasks {
@@ -637,11 +825,32 @@ impl NotificationSource for NiftyProvider {
             }
         }
 
+        // Discussions to visit this cycle, resuming the rotation where the last
+        // cycle stopped. Built before the directory so a cycle with no task
+        // changes but a pending discussion still resolves author names.
+        let discussion_targets: Vec<(String, String)> = projects
+            .iter()
+            .filter_map(|p| p.discussion_chat().map(|c| (p.id.clone(), c.to_string())))
+            .collect();
+
+        let rotation_start = if discussion_targets.is_empty() {
+            0
+        } else {
+            state.discussion_rotation % discussion_targets.len()
+        };
+        let discussion_slice: Vec<(String, String)> = discussion_targets
+            .iter()
+            .cycle()
+            .skip(rotation_start)
+            .take(DISCUSSIONS_PER_CYCLE.min(discussion_targets.len()))
+            .cloned()
+            .collect();
+
         // Author names come from the member directory — one call, and only when
         // there is actually something to render, so a quiet cycle still costs
         // just the phase-1 sweep. A failure here is non-fatal: events fall back
         // to bare IDs rather than being dropped.
-        let directory = if queue.is_empty() {
+        let directory = if queue.is_empty() && discussion_slice.is_empty() {
             HashMap::new()
         } else {
             match self.member_directory().await {
@@ -671,7 +880,7 @@ impl NotificationSource for NiftyProvider {
         let mut drained = 0usize;
 
         for task_id in &queue {
-            if calls >= budget {
+            if calls >= task_budget {
                 break;
             }
             // A per-task failure must not discard the whole cycle. Nifty
@@ -721,11 +930,64 @@ impl NotificationSource for NiftyProvider {
         // Anything we couldn't reach this cycle carries over.
         let pending: Vec<String> = queue.into_iter().skip(drained).collect();
 
+        // --- Phase 3: project discussions (rotation) ------------------------
+        //
+        // Unconditional — discussions expose no change signal — so this runs
+        // after task fan-out and only with whatever budget survived it. Tasks
+        // keep priority because they carry the `pending` backlog; a starved
+        // discussion is simply visited on a later turn of the rotation.
+        let mut discussions_visited = 0usize;
+        for (project_id, chat_id) in &discussion_slice {
+            if calls >= budget {
+                break;
+            }
+            let msgs = match self.fetch_discussion(chat_id).await {
+                Ok(m) => m,
+                Err(e @ (ProviderError::Auth(_) | ProviderError::RateLimited(_))) => return Err(e),
+                Err(_) => {
+                    // Transient per-chat failure (Nifty 502s intermittently).
+                    // Count it as visited so the rotation still advances rather
+                    // than retrying the same broken chat forever.
+                    calls += 1;
+                    discussions_visited += 1;
+                    continue;
+                }
+            };
+            calls += 1;
+            discussions_visited += 1;
+
+            let project = projects_by_id.get(project_id.as_str()).copied();
+
+            for m in &msgs {
+                if m.is_deleted {
+                    continue;
+                }
+                let ts = m.timestamp_ms();
+                if ts <= cutoff {
+                    continue;
+                }
+                if self.is_suppressed_own_action(m) {
+                    continue;
+                }
+                if ts > max_ts {
+                    max_ts = ts;
+                }
+                events.push(self.to_event(m, None, project, &directory));
+            }
+        }
+
+        let discussion_rotation = if discussion_targets.is_empty() {
+            0
+        } else {
+            (rotation_start + discussions_visited) % discussion_targets.len()
+        };
+
         events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
         let next_state = NiftyCursorState {
             fingerprints: next_fingerprints,
             pending,
+            discussion_rotation,
         };
 
         Ok(FetchResult {
@@ -834,17 +1096,25 @@ impl ActionSource for NiftyProvider {
         // `resolve_mentions` decodes on the way in. Sending the display name or
         // email as plain text posts fine but links nobody and notifies nobody.
         let body = render_mentions(text, |m| format!("<@{}>", m.id));
-        // Verified live: type=text + task_id creates a task comment (HTTP 201).
-        self.send_json(
-            reqwest::Method::POST,
-            "messages",
-            serde_json::json!({
+
+        // A project discussion posts to the same endpoint but keys on `chat_id`;
+        // sending `task_id` for a chat (or vice versa) is rejected. Both shapes
+        // verified live against the real API — each returns HTTP 201.
+        let payload = match item_id.strip_prefix(DISCUSSION_ID_PREFIX) {
+            Some(chat_id) => serde_json::json!({
+                "type": "text",
+                "text": body,
+                "chat_id": chat_id,
+            }),
+            None => serde_json::json!({
                 "type": "text",
                 "text": body,
                 "task_id": item_id,
             }),
-        )
-        .await
+        };
+
+        self.send_json(reqwest::Method::POST, "messages", payload)
+            .await
     }
 
     async fn statuses(&self, project_id: &str) -> Result<Vec<StatusOption>, ProviderError> {
@@ -1089,6 +1359,7 @@ mod tests {
             text: None,
             subtype: None,
             task: None,
+            chat: None,
             author: Some(author.into()),
             tagged: tagged.iter().map(|s| s.to_string()).collect(),
             seen_by: vec![],
@@ -1240,6 +1511,7 @@ mod tests {
             text: None,
             subtype: s.map(String::from),
             task: None,
+            chat: None,
             author: None,
             tagged: vec![],
             seen_by: vec![],
@@ -1276,6 +1548,7 @@ mod tests {
                 text: Some(text.into()),
                 subtype: Some(subtype.into()),
                 task: Some("t1".into()),
+                chat: None,
                 author: Some("someone".into()),
                 tagged: vec![],
                 seen_by: vec![],
@@ -1383,6 +1656,414 @@ mod tests {
         );
     }
 
+    fn project(id: &str, chat: Option<&str>) -> NiftyProject {
+        NiftyProject {
+            id: id.into(),
+            nice_id: Some("PRJ".into()),
+            name: Some("Proj".into()),
+            archived: false,
+            removed: false,
+            general_discussion: chat.map(String::from),
+            general_discussion_muted: false,
+            enabled_modules: vec!["tasks".into(), "discussion".into()],
+        }
+    }
+
+    #[test]
+    fn discussion_chat_is_returned_when_enabled() {
+        assert_eq!(project("p", Some("c1")).discussion_chat(), Some("c1"));
+    }
+
+    /// Nifty's own UI stays quiet for a muted discussion; the app must match, or
+    /// it notifies for a channel the user deliberately silenced.
+    #[test]
+    fn muted_discussion_is_skipped() {
+        let mut p = project("p", Some("c1"));
+        p.general_discussion_muted = true;
+        assert_eq!(p.discussion_chat(), None);
+    }
+
+    #[test]
+    fn discussion_disabled_module_is_skipped() {
+        let mut p = project("p", Some("c1"));
+        p.enabled_modules = vec!["tasks".into()];
+        assert_eq!(p.discussion_chat(), None);
+    }
+
+    /// A payload that omits `enabled_modules` must not be read as "every module
+    /// is off" — that would silently disable discussions workspace-wide.
+    #[test]
+    fn absent_enabled_modules_does_not_disable_discussion() {
+        let mut p = project("p", Some("c1"));
+        p.enabled_modules = vec![];
+        assert_eq!(p.discussion_chat(), Some("c1"));
+    }
+
+    #[test]
+    fn project_without_discussion_chat_is_skipped() {
+        assert_eq!(project("p", None).discussion_chat(), None);
+        assert_eq!(project("p", Some("")).discussion_chat(), None);
+    }
+
+    /// The rotation must cover every discussion across successive cycles, and
+    /// wrap — otherwise later projects are never polled at all.
+    #[test]
+    fn discussion_rotation_covers_all_projects_and_wraps() {
+        let targets: Vec<String> = (0..10).map(|i| format!("c{}", i)).collect();
+        let mut rotation = 0usize;
+        let mut seen: Vec<String> = Vec::new();
+
+        // Three cycles at 6 per cycle over 10 targets: full coverage plus wrap.
+        for _ in 0..3 {
+            let start = rotation % targets.len();
+            let slice: Vec<String> = targets
+                .iter()
+                .cycle()
+                .skip(start)
+                .take(DISCUSSIONS_PER_CYCLE.min(targets.len()))
+                .cloned()
+                .collect();
+            assert_eq!(slice.len(), DISCUSSIONS_PER_CYCLE);
+            seen.extend(slice.iter().cloned());
+            rotation = (start + DISCUSSIONS_PER_CYCLE) % targets.len();
+        }
+
+        for t in &targets {
+            assert!(seen.contains(t), "{} was never polled by the rotation", t);
+        }
+    }
+
+    /// A workspace with fewer discussions than the per-cycle cap must not spin
+    /// the rotation past the end or re-fetch the same chat twice in one cycle.
+    #[test]
+    fn discussion_rotation_handles_fewer_targets_than_cap() {
+        let targets = vec!["a".to_string(), "b".to_string()];
+        let start = 0usize;
+        let slice: Vec<String> = targets
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(DISCUSSIONS_PER_CYCLE.min(targets.len()))
+            .cloned()
+            .collect();
+        assert_eq!(slice, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    fn discussion_msg(text: &str) -> NiftyMessage {
+        NiftyMessage {
+            id: "dm1".into(),
+            text: Some(text.into()),
+            subtype: None,
+            task: None,
+            chat: Some("T5Goj36a!N!sbx".into()),
+            author: Some("CnAHALsDiDgBv".into()),
+            tagged: vec![],
+            seen_by: vec![],
+            created_at: Some("2024-06-20T09:35:56.812Z".into()),
+            is_deleted: false,
+        }
+    }
+
+    /// A discussion message has no task. Keyed on the task ID it would produce
+    /// an event with an empty subject and no deep link, so the subject must fall
+    /// back to the project.
+    #[test]
+    fn discussion_event_is_subjected_to_the_project() {
+        let p = NiftyProvider::with_workspace("t", "me", "https://acme.nifty.pm");
+        let d = directory(&[("CnAHALsDiDgBv", "Bo")]);
+        let proj = project("iVLWyIgDPUTn4W", Some("T5Goj36a!N!sbx"));
+
+        let ev = p.to_event(&discussion_msg("hello"), None, Some(&proj), &d);
+
+        assert_eq!(ev.subject.id, "chat:T5Goj36a!N!sbx");
+        assert_eq!(ev.subject.project_id.as_deref(), Some("iVLWyIgDPUTn4W"));
+        assert_eq!(ev.subject.title.as_deref(), Some("Proj · Discussion"));
+        assert_eq!(ev.kind, EventKind::Comment);
+        assert_eq!(ev.actor.as_ref().map(|a| a.name.as_str()), Some("Bo"));
+        assert_eq!(
+            ev.url.as_deref(),
+            Some("https://acme.nifty.pm/iVLWyIgDPUTn4W/discussion")
+        );
+    }
+
+    /// Mentions resolve identically in discussions — the payload shape is the
+    /// same, so the task path's rendering must carry over.
+    #[test]
+    fn discussion_message_resolves_mentions() {
+        let p = NiftyProvider::with_workspace("t", "me", "https://acme.nifty.pm");
+        let d = directory(&[("CnAHALsDiDgBv", "Bo"), ("fo_OWHEm!UvNxf", "Dele")]);
+        let proj = project("p1", Some("c1"));
+
+        let ev = p.to_event(
+            &discussion_msg("<@fo_OWHEm!UvNxf> okay. noted"),
+            None,
+            Some(&proj),
+            &d,
+        );
+        assert_eq!(ev.text.as_deref(), Some("@Dele okay. noted"));
+    }
+
+    /// Task events must keep pointing at the task route — the discussion branch
+    /// must not capture them just because they share a project.
+    #[test]
+    fn task_event_still_uses_the_task_url() {
+        let p = NiftyProvider::with_workspace("t", "me", "https://acme.nifty.pm");
+        let d = directory(&[]);
+        let proj = project("p1", Some("c1"));
+        let t = task("task9", 1, false);
+
+        let mut m = discussion_msg("a task comment");
+        m.chat = None;
+        m.task = Some("task9".into());
+
+        let ev = p.to_event(&m, Some(&t), Some(&proj), &d);
+        assert_eq!(ev.subject.id, "task9");
+        assert_eq!(
+            ev.url.as_deref(),
+            Some("https://acme.nifty.pm/p1/task/task9")
+        );
+    }
+
+    /// Observed live on `messages?chat_id=`; previously fell through to `Other`.
+    #[test]
+    fn discussion_membership_subtypes_are_mapped() {
+        let mut m = discussion_msg("joined");
+        m.subtype = Some("joinProject".into());
+        assert_eq!(m.kind(), EventKind::ItemCreated);
+        m.subtype = Some("leaveProject".into());
+        assert_eq!(m.kind(), EventKind::ItemCreated);
+    }
+
+    /// Self-suppression applies to discussions too, on the same rules.
+    #[test]
+    fn own_discussion_message_is_suppressed_unless_it_tags_me() {
+        let p = NiftyProvider::new("t", "me");
+        let mut m = discussion_msg("mine");
+        m.author = Some("me".into());
+        assert!(p.is_suppressed_own_action(&m));
+        m.tagged = vec!["me".into()];
+        assert!(!p.is_suppressed_own_action(&m));
+    }
+
+    /// The reply path receives only an opaque item ID, so the `chat:` prefix is
+    /// the sole signal that a comment must post to `chat_id` rather than
+    /// `task_id`. Sending the wrong key is rejected by the API.
+    #[test]
+    fn discussion_subject_id_is_prefixed_for_reply_routing() {
+        let p = NiftyProvider::with_workspace("t", "me", "https://acme.nifty.pm");
+        let d = directory(&[]);
+        let proj = project("p1", Some("c1"));
+        let ev = p.to_event(&discussion_msg("hi"), None, Some(&proj), &d);
+
+        assert!(ev.subject.id.starts_with(DISCUSSION_ID_PREFIX));
+        assert_eq!(
+            ev.subject.id.strip_prefix(DISCUSSION_ID_PREFIX),
+            Some("T5Goj36a!N!sbx"),
+            "the chat id must survive round-tripping through the subject"
+        );
+        // The deep link must still come from the project, not the prefixed id.
+        assert_eq!(
+            ev.url.as_deref(),
+            Some("https://acme.nifty.pm/p1/discussion")
+        );
+    }
+
+    /// Nifty IDs use `!` and `_` but never `:` — verified across 336 real task,
+    /// project, chat, and member IDs — so a task ID can never be mistaken for a
+    /// prefixed discussion ID.
+    #[test]
+    fn task_ids_do_not_collide_with_the_discussion_prefix() {
+        for id in ["ymaf9QHxcUq!Uc", "iVLWyIgDPUTn4W", "fo_OWHEm!UvNxf", "T_F6bpSrBoQMg!"] {
+            assert!(
+                !id.starts_with(DISCUSSION_ID_PREFIX),
+                "{} would be misrouted as a discussion",
+                id
+            );
+        }
+    }
+
+    /// Live: a reply must reach a project discussion, not just a task. Posts a
+    /// real message and deletes it immediately. Ignored by default — it mutates
+    /// a real workspace and is briefly visible to teammates.
+    ///   cargo test --lib discussion_reply_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn discussion_reply_live() {
+        let token = std::env::var("NIFTY_TOKEN").expect("NIFTY_TOKEN not set");
+        let uid = NiftyProvider::new(&token, "").validate().await.unwrap();
+        let p = NiftyProvider::new(&token, &uid);
+
+        // Target the quietest discussion to minimise what teammates see.
+        let projects = p.list_projects().await.expect("list_projects failed");
+        let mut best: Option<(String, usize)> = None;
+        for pr in &projects {
+            if let Some(chat) = pr.discussion_chat() {
+                let n = p.fetch_discussion(chat).await.map(|m| m.len()).unwrap_or(usize::MAX);
+                if best.as_ref().map_or(true, |(_, bn)| n < *bn) {
+                    best = Some((chat.to_string(), n));
+                }
+            }
+        }
+        let (chat, _) = best.expect("no discussion channel available");
+
+        let item_id = format!("{}{}", DISCUSSION_ID_PREFIX, chat);
+        p.comment(&item_id, "(automated test — deleting immediately)")
+            .await
+            .expect("discussion reply failed");
+
+        // Confirm it landed, then remove it.
+        let msgs = p.fetch_discussion(&chat).await.expect("re-fetch failed");
+        let posted = msgs
+            .iter()
+            .find(|m| {
+                m.author.as_deref() == Some(uid.as_str())
+                    && m.text.as_deref().is_some_and(|t| t.contains("automated test"))
+                    && !m.is_deleted
+            })
+            .expect("posted reply not found in the discussion");
+        println!("posted to discussion {}: message {}", chat, posted.id);
+
+        p.send_json(
+            reqwest::Method::DELETE,
+            &format!("messages/{}", urlencoding::encode(&posted.id)),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("cleanup delete failed");
+        println!("cleaned up {}", posted.id);
+    }
+
+    /// Read state is one-way: `seen_by` is populated but there is no endpoint to
+    /// write it back. If Nifty ever ships one this test starts failing, which is
+    /// the signal to revisit `seen_remotely`.
+    #[tokio::test]
+    #[ignore]
+    async fn read_state_is_not_writable_live() {
+        let token = std::env::var("NIFTY_TOKEN").expect("NIFTY_TOKEN not set");
+        let uid = NiftyProvider::new(&token, "").validate().await.unwrap();
+        let p = NiftyProvider::new(&token, &uid);
+
+        let projects = p.list_projects().await.expect("list_projects failed");
+        let chat = projects
+            .iter()
+            .find_map(|pr| pr.discussion_chat())
+            .expect("no discussion channel");
+        let msgs = p.fetch_discussion(chat).await.expect("fetch failed");
+        let target = msgs
+            .iter()
+            .find(|m| !m.is_deleted && !m.seen_by.iter().any(|s| s == &uid));
+        let Some(target) = target else {
+            println!("every message already seen; nothing to probe");
+            return;
+        };
+
+        let mid = urlencoding::encode(&target.id).into_owned();
+        for (method, path) in [
+            (reqwest::Method::POST, format!("messages/{}/seen", mid)),
+            (reqwest::Method::POST, format!("messages/{}/read", mid)),
+            (reqwest::Method::POST, "messages/seen".to_string()),
+        ] {
+            let r = p
+                .send_json(method.clone(), &path, serde_json::json!({}))
+                .await;
+            println!("{} /{} -> {:?}", method, path, r.as_ref().err());
+            assert!(
+                r.is_err(),
+                "{} /{} unexpectedly succeeded — Nifty may have shipped a \
+                 mark-read endpoint; revisit seen_remotely",
+                method,
+                path
+            );
+        }
+    }
+
+    /// Live: confirms project discussions are reachable and that the rotation
+    /// actually yields discussion-subjected events. Run with:
+    ///   cargo test --lib discussions_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn discussions_live() {
+        let token = std::env::var("NIFTY_TOKEN").expect("NIFTY_TOKEN not set");
+        let uid = NiftyProvider::new(&token, "").validate().await.unwrap();
+        let p = NiftyProvider::with_workspace(&token, &uid, "https://protomated.nifty.pm");
+
+        let projects = p.list_projects().await.expect("list_projects failed");
+        let with_disc: Vec<_> = projects
+            .iter()
+            .filter_map(|pr| pr.discussion_chat().map(|c| (pr.nice_id.clone(), c)))
+            .collect();
+        println!("projects with a discussion channel: {}", with_disc.len());
+        assert!(
+            !with_disc.is_empty(),
+            "no project exposed general_discussion — the field or gating regressed"
+        );
+
+        let (nice, chat) = &with_disc[0];
+        let msgs = p.fetch_discussion(chat).await.expect("fetch_discussion failed");
+        println!("{:?} discussion -> {} messages", nice, msgs.len());
+        for m in msgs.iter().take(3) {
+            println!("  [{:?}] {:?}", m.subtype, m.text.as_deref().unwrap_or(""));
+        }
+        // Every message from this endpoint must carry `chat`, which is what
+        // routes it down the discussion branch in `to_event`.
+        assert!(
+            msgs.iter().all(|m| m.chat.is_some()),
+            "a discussion message arrived without `chat` — subject routing would break"
+        );
+    }
+
+    /// Regression guard for the starvation risk: on a workspace whose task
+    /// backlog saturates `budget`, phase 3 runs with nothing left and the
+    /// rotation never advances, so discussions are never polled at all.
+    /// Measured live at 120/120 calls with 94 tasks pending, so this is the
+    /// real steady state, not a corner case.
+    #[tokio::test]
+    #[ignore]
+    async fn discussions_are_not_starved_by_task_backlog_live() {
+        let token = std::env::var("NIFTY_TOKEN").expect("NIFTY_TOKEN not set");
+        let uid = NiftyProvider::new(&token, "").validate().await.unwrap();
+        let p = NiftyProvider::with_workspace(&token, &uid, "https://protomated.nifty.pm");
+
+        const BUDGET: u32 = 120;
+        let task_budget = BUDGET - DISCUSSION_RESERVE.min(BUDGET / 4);
+
+        let mut cursor = Cursor::default();
+        let mut spends = Vec::new();
+        for cycle in 0..3 {
+            let r = p.fetch(&cursor, BUDGET).await.expect("fetch failed");
+            let st: NiftyCursorState =
+                serde_json::from_value(r.cursor.state.clone()).unwrap_or_default();
+            println!(
+                "cycle {}: {} calls (task budget {}), {} pending tasks, rotation={}",
+                cycle,
+                r.calls_used,
+                task_budget,
+                st.pending.len(),
+                st.discussion_rotation
+            );
+            assert!(
+                r.calls_used <= BUDGET,
+                "cycle {} overspent: {} > {}",
+                cycle,
+                r.calls_used,
+                BUDGET
+            );
+            spends.push((r.calls_used, task_budget));
+            cursor = r.cursor;
+        }
+
+        // Rotation alone is not the signal: when the target count divides
+        // evenly into the per-cycle cap it wraps back to 0 every cycle, which
+        // means *full* coverage, not none. What matters is that phase 3 got
+        // calls at all — so assert on the spend above the task reserve.
+        assert!(
+            spends.iter().any(|&(used, task_budget)| used > task_budget),
+            "no cycle spent beyond the task budget ({:?}) — phase 3 never ran \
+             and the task backlog is starving discussions",
+            spends
+        );
+    }
+
     #[test]
     fn parses_rfc3339_timestamp() {
         let m = NiftyMessage {
@@ -1390,6 +2071,7 @@ mod tests {
             text: None,
             subtype: None,
             task: None,
+            chat: None,
             author: None,
             tagged: vec![],
             seen_by: vec![],

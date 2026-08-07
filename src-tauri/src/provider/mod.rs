@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | Feed | global `/activities` | per-task `/messages` (no project-wide) |
 //! | Delta | `timestamp > watermark` server-side | none — client-side diff |
-//! | Read state | local only | local only (`seen_by` is never populated) |
+//! | Read state | local only | local only (`seen_by` is populated but read-only) |
 //! | Mutations | command API | REST |
 //!
 //! A shared "API client" trait would leak those differences into every caller.

@@ -149,10 +149,22 @@ function App() {
   // Unread count derived from filtered activities so badge matches the feed
   const unreadCount = countUnread(flatActivities, readIds);
 
-  // Sync the filtered unread count to the tray badge so it matches the feed
+  // Mirror the feed's filters into the backend, which owns the tray badge.
+  //
+  // The badge used to be pushed from here on every unreadCount change, but this
+  // runs in a webview that is hidden whenever the app is in the tray — its
+  // normal state — where the OS throttles or suspends it. The count then went
+  // stale exactly when it mattered. The backend recomputes it each poll; this
+  // only has to keep it told what the filters are.
   useEffect(() => {
-    invoke("set_tray_badge", { count: unreadCount }).catch(() => {});
-  }, [unreadCount]);
+    invoke("set_feed_filters", {
+      accounts: Array.from(selectedAccounts),
+      projects: Array.from(selectedProjects),
+      kinds: Array.from(selectedTypes),
+      search: searchQuery,
+      assignedToMeOnly: assignedToMeOnly,
+    }).catch(() => {});
+  }, [selectedAccounts, selectedProjects, selectedTypes, searchQuery, assignedToMeOnly]);
 
   // Keyboard action: open in browser — resolve the correct account's base URL
   const handleKbOpen = useCallback(
@@ -357,19 +369,18 @@ function App() {
   useEffect(() => {
     if (!hasAccounts || connectionStatus !== "connected") return;
 
-    let idleTimer: ReturnType<typeof setTimeout>;
-
     const handleFocus = () => {
-      clearTimeout(idleTimer);
       setFocusState("focused");
     };
 
+    // Promotion to the idle tier is the backend's job. This used to arm a
+    // 5-minute setTimeout here, but the window is hidden on the very next line
+    // and a hidden webview is throttled or suspended by the OS — so the timer
+    // fired late or never, and polling stayed at the faster minimized rate
+    // indefinitely. The backend stamps the transition and promotes itself.
     const handleBlur = () => {
       getCurrentWindow().hide();
       setFocusState("minimized");
-      idleTimer = setTimeout(() => {
-        setFocusState("idle");
-      }, 5 * 60 * 1000);
     };
 
     window.addEventListener("focus", handleFocus);
@@ -378,7 +389,6 @@ function App() {
     return () => {
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener("blur", handleBlur);
-      clearTimeout(idleTimer);
     };
   }, [hasAccounts, connectionStatus, setFocusState]);
 
