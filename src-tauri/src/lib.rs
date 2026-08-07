@@ -130,6 +130,15 @@ async fn set_focus_state(
         "idle" => FocusState::Idle,
         _ => return Err(format!("Invalid focus state: {}", focus)),
     };
+    // Stamp the transition so the polling loop can promote Minimized -> Idle on
+    // its own. The frontend used to do this with a 5-minute setTimeout, but the
+    // window is hidden on blur and a hidden webview is throttled or suspended,
+    // so that timer fired late or never and the app stayed at the faster
+    // minimized rate indefinitely.
+    mgr.unfocused_since = match mgr.focus_state {
+        FocusState::Focused => None,
+        _ => Some(std::time::Instant::now()),
+    };
     Ok(())
 }
 
@@ -243,14 +252,21 @@ async fn set_muted_issues(
 
 #[tauri::command]
 async fn set_read_ids(
+    app: tauri::AppHandle,
     state: tauri::State<'_, SharedPollingState>,
     read_ids: Vec<String>,
     account_id: String,
 ) -> Result<(), String> {
-    let mut mgr = state.write().await;
-    if let Some(acct) = mgr.accounts.get_mut(&account_id) {
-        acct.read_ids = read_ids.into_iter().collect();
-    }
+    let count = {
+        let mut mgr = state.write().await;
+        if let Some(acct) = mgr.accounts.get_mut(&account_id) {
+            acct.read_ids = read_ids.into_iter().collect();
+        }
+        mgr.filtered_unread_count()
+    };
+    // Marking read changes the badge now, not at the next poll (up to two
+    // minutes out on the idle tier).
+    tray::update_tray_badge(&app, count);
     Ok(())
 }
 
@@ -315,6 +331,39 @@ async fn get_unread_count(state: tauri::State<'_, SharedPollingState>) -> Result
 
 #[tauri::command]
 async fn set_tray_badge(app: tauri::AppHandle, count: u32) -> Result<(), String> {
+    tray::update_tray_badge(&app, count);
+    Ok(())
+}
+
+/// Mirror the feed's filters into the backend.
+///
+/// Pushed on change rather than read per poll: the badge is computed in the
+/// polling loop so it stays correct while the window is hidden, and the backend
+/// cannot ask a throttled webview what the current filters are.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn set_feed_filters(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, SharedPollingState>,
+    accounts: Vec<String>,
+    projects: Vec<String>,
+    kinds: Vec<String>,
+    search: String,
+    assigned_to_me_only: bool,
+) -> Result<(), String> {
+    let count = {
+        let mut mgr = state.write().await;
+        mgr.filters = polling::FeedFilters {
+            accounts: accounts.into_iter().collect(),
+            projects: projects.into_iter().collect(),
+            kinds: kinds.into_iter().collect(),
+            search,
+            assigned_to_me_only,
+        };
+        mgr.filtered_unread_count()
+    };
+    // Repaint immediately: a filter change alters the badge even though no poll
+    // happened, and the next poll may be two minutes out.
     tray::update_tray_badge(&app, count);
     Ok(())
 }
@@ -569,6 +618,7 @@ pub fn run() {
             set_muted_issues,
             get_projects,
             set_tray_badge,
+            set_feed_filters,
             set_read_ids,
             restore_activities,
             execute_command,
