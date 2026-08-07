@@ -109,12 +109,64 @@ fn show_window(app: &AppHandle) {
     }
 }
 
-/// Update the tray icon badge (title text next to icon) and tooltip with unread count.
+/// Overlay a badge dot onto the tray icon for platforms without a text title.
+///
+/// `set_title` renders text beside the icon in the macOS menu bar, but is a
+/// no-op on Windows and Linux — so on those platforms the unread count was
+/// invisible, surfacing only in the hover tooltip. A composited dot is the
+/// conventional fallback: it needs no font rasterization (and so no new
+/// dependency), and reads at 16px where glyphs would not.
+///
+/// Returns `None` if the base icon cannot be decoded, in which case the caller
+/// leaves the existing icon alone rather than clearing it.
+#[cfg(not(target_os = "macos"))]
+fn badged_icon(unread_count: u32) -> Option<Image<'static>> {
+    const BASE: &[u8] = include_bytes!("../icons/tray-icon@2x.png");
+    let img = image::load_from_memory(BASE).ok()?;
+    let mut rgba = img.into_rgba8();
+    let (w, h) = rgba.dimensions();
+
+    if unread_count > 0 {
+        // Filled circle in the top-right quadrant, sized relative to the icon so
+        // this holds if the asset is ever swapped for another resolution.
+        let r = (w.min(h) as f32 * 0.28).max(3.0);
+        let cx = w as f32 - r - 1.0;
+        let cy = r + 1.0;
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 + 0.5 - cx;
+                let dy = y as f32 + 0.5 - cy;
+                let d = (dx * dx + dy * dy).sqrt();
+                if d <= r {
+                    // Antialias the rim so the dot does not look ragged.
+                    let a = ((r - d).clamp(0.0, 1.0) * 255.0) as u8;
+                    let px = rgba.get_pixel_mut(x, y);
+                    let blend = |bg: u8, fg: u8| {
+                        ((fg as u16 * a as u16 + bg as u16 * (255 - a) as u16) / 255) as u8
+                    };
+                    px.0 = [
+                        blend(px.0[0], 235),
+                        blend(px.0[1], 87),
+                        blend(px.0[2], 87),
+                        px.0[3].max(a),
+                    ];
+                }
+            }
+        }
+    }
+
+    Some(Image::new_owned(rgba.into_raw(), w, h))
+}
+
+/// Update the tray icon badge and tooltip with the unread count.
 pub fn update_tray_badge(app: &AppHandle, unread_count: u32) {
     if let Some(tray) = app.tray_by_id("feedglance-tray") {
         // set_title shows text next to the icon in the macOS menu bar.
         // Use Some("") instead of None to clear the title — on macOS,
         // set_title(None) can be a no-op that leaves the old text visible.
+        //
+        // It is a no-op on Windows and Linux, which is why those platforms get
+        // the composited dot below instead.
         let title = if unread_count == 0 {
             String::new()
         } else if unread_count > 99 {
@@ -123,6 +175,21 @@ pub fn update_tray_badge(app: &AppHandle, unread_count: u32) {
             unread_count.to_string()
         };
         let _ = tray.set_title(Some(title.as_str()));
+
+        // Repainting the icon costs a small composite, so only do it when the
+        // zero/non-zero state actually flips — the count itself is not drawn.
+        #[cfg(not(target_os = "macos"))]
+        {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static HAS_BADGE: AtomicBool = AtomicBool::new(false);
+            let want = unread_count > 0;
+            if HAS_BADGE.swap(want, Ordering::Relaxed) != want {
+                if let Some(icon) = badged_icon(unread_count) {
+                    let _ = tray.set_icon(Some(icon));
+                    let _ = tray.set_icon_as_template(true);
+                }
+            }
+        }
 
         // Also update tooltip for hover
         let tooltip = if unread_count == 0 {
