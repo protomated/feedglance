@@ -115,6 +115,12 @@ export function eventUrl(event: NormalizedEvent, instanceUrl?: string): string |
   // cosmetic, so it is omitted — links stay correct when a task is renamed.
   // A task is not addressable without its project.
   if (event.provider === "nifty" && event.subject.id && event.subject.projectId) {
+    // A project-discussion subject carries a `chat:`-prefixed id (the backend
+    // stamps it so replies can route to chat_id). It is not a task, so falling
+    // through would build /{proj}/task/chat:{id} — a link to nothing.
+    if (event.subject.id.startsWith("chat:")) {
+      return `${host}/${event.subject.projectId}/discussion`;
+    }
     return `${host}/${event.subject.projectId}/task/${event.subject.id}`;
   }
   return undefined;
