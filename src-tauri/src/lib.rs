@@ -259,9 +259,19 @@ async fn set_read_ids(
 ) -> Result<(), String> {
     let count = {
         let mut mgr = state.write().await;
-        if let Some(acct) = mgr.accounts.get_mut(&account_id) {
-            acct.read_ids = read_ids.into_iter().collect();
-        }
+        // Create the account if it does not exist yet. On startup the frontend
+        // pushes its disk-loaded read IDs before polling has registered the
+        // account, so a `get_mut` here silently dropped them — the backend then
+        // counted every restored event as unread and the tray showed a full
+        // backlog against an empty feed. `start_polling` fills in the real
+        // credentials later without clearing what we store here, exactly as
+        // `restore_activities` does.
+        mgr.accounts
+            .entry(account_id)
+            .or_insert_with(|| {
+                AccountPollingState::new(String::new(), String::new(), String::new())
+            })
+            .read_ids = read_ids.into_iter().collect();
         mgr.filtered_unread_count()
     };
     // Marking read changes the badge now, not at the next poll (up to two

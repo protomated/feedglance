@@ -982,6 +982,40 @@ mod tests {
         assert_eq!(mgr.total_unread_count(), 1);
     }
 
+    /// Startup ordering: the frontend pushes disk-loaded read IDs before
+    /// polling has registered the account. `set_read_ids` must therefore create
+    /// the account rather than drop the write — otherwise `restore_activities`
+    /// seeds events into a state with no read IDs and every one counts as
+    /// unread, showing a full tray badge against an "all caught up" feed.
+    ///
+    /// Provider-agnostic: the entry is created the same way for YouTrack and
+    /// Nifty, and neither reports remote read state, so both rely on this set.
+    #[test]
+    fn read_ids_survive_arriving_before_the_account_exists() {
+        let mut mgr = PollingManager::new();
+        assert!(mgr.accounts.is_empty());
+
+        // What `set_read_ids` does for an account polling has not created yet.
+        mgr.accounts
+            .entry("acct".to_string())
+            .or_insert_with(|| {
+                AccountPollingState::new(String::new(), String::new(), String::new())
+            })
+            .read_ids = ["a".to_string()].into_iter().collect();
+
+        // Then the cache is restored into that same account.
+        let acct = mgr.accounts.get_mut("acct").unwrap();
+        let mut a = event(EventKind::Comment, false, serde_json::Value::Null);
+        a.id = "a".into();
+        let mut b = event(EventKind::Comment, false, serde_json::Value::Null);
+        b.id = "b".into();
+        acct.events = vec![a, b];
+
+        // Only the genuinely unread event counts; "a" was already read.
+        assert_eq!(mgr.total_unread_count(), 1);
+        assert_eq!(mgr.filtered_unread_count(), 1);
+    }
+
     #[test]
     fn nifty_is_pollable_without_url() {
         let acct = AccountPollingState::with_provider(

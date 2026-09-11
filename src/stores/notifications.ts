@@ -246,7 +246,9 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
         const { ids, map } = await loadReadIds(store, key, now);
         await store.set(key, map);
         readIdsMap.set(account.id, ids);
-        syncReadIdsToBackend(account.id, ids);
+        // Awaited: the backend must have the read IDs before `restore_activities`
+        // seeds its event list, or every restored event counts as unread.
+        await syncReadIdsToBackend(account.id, ids);
       }
 
       // Also try to load legacy flat read_ids and attribute to first account
@@ -264,7 +266,7 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
           for (const id of existing) migrated[id] = now;
           await store.set(readIdsKey(firstId), migrated);
           await store.delete("read_ids");
-          syncReadIdsToBackend(firstId, existing);
+          await syncReadIdsToBackend(firstId, existing);
         }
       }
 
