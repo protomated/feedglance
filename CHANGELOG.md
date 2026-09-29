@@ -1,5 +1,9 @@
 # Changelog
 
+> **This file is no longer updated.** It stops at 0.5.3, when release-please was
+> retired. Release notes for every later version, including the switch to CalVer
+> (`YY.M.PATCH`), are on [GitHub Releases](https://github.com/protomated/feedglance/releases).
+
 ## [0.5.3](https://github.com/protomated/youtrackd/compare/youtrackd-v0.5.2...youtrackd-v0.5.3) (2026-06-07)
 
 

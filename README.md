@@ -91,25 +91,52 @@ pnpm tauri build
 
 ## Releasing
 
-Releases are fully automated via [release-please](https://github.com/googleapis/release-please) and GitHub Actions. Versions are determined from [Conventional Commits](https://www.conventionalcommits.org/).
+Releases are fully automated by GitHub Actions (`.github/workflows/release.yml`). Every push to `main` is checked, and if it contains a release-worthy commit, a new version is built and published with no manual steps.
 
-### Commit conventions
+### Version scheme
 
-| Prefix | Version bump | Example |
-|--------|-------------|---------|
-| `fix:` | Patch (`0.1.0` → `0.1.1`) | `fix: prevent duplicate notifications` |
-| `feat:` | Minor (`0.1.0` → `0.2.0`) | `feat: add quick-assign action` |
-| `feat!:` or `BREAKING CHANGE:` | Major (`0.x` → `1.0.0`) | `feat!: redesign settings API` |
+Feedglance uses calendar versioning in the form **`YY.M.PATCH`**:
 
-Other prefixes (`chore:`, `docs:`, `ci:`, `refactor:`, `test:`) do not trigger a release.
+| Part | Meaning | Example |
+|------|---------|---------|
+| `YY` | Two-digit UTC year | `26` = 2026 |
+| `M` | UTC month, **not** zero-padded | `9` = September, `10` = October |
+| `PATCH` | Release number within that month, starting at `0` | `0`, `1`, `2`… |
+
+So the first release in October 2026 is `26.10.0`, the next is `26.10.1`, and the first in November is `26.11.0`. Tags are prefixed `feedglance-v` (e.g. `feedglance-v26.10.0`).
+
+These constraints are deliberate:
+
+- **Two-digit year:** Windows MSI installers cap the first two version fields at 255, so `2026.x.x` cannot be built.
+- **No zero-padding:** `26.09.0` is not a valid semver string, which Cargo and the Tauri updater both require.
+
+Versions before `26.x` used semver (`0.1.0`–`0.10.0`). CalVer versions sort above them, so existing installs update normally.
+
+### What triggers a release
+
+Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). The prefix decides **whether** a push releases; the date decides the version number.
+
+| Prefix | Releases? | Example |
+|--------|-----------|---------|
+| `feat:` | Yes | `feat: add quick-assign action` |
+| `fix:` / `perf:` | Yes | `fix: prevent duplicate notifications` |
+| `feat!:` / `BREAKING CHANGE:` footer | Yes, with a breaking-change notice at the top of the release notes | `feat!: drop macOS 11 support` |
+| `chore:` / `ci:` / `docs:` / `refactor:` / `test:` | No | `docs: fix typo` |
+
+Add `[skip ci]` or `[skip release]` to the **last** commit of a push to stop that push from releasing.
 
 ### How it works
 
-1. **Push conventional commits to `main`** — write your commits as usual.
-2. **Release PR appears automatically** — release-please opens (or updates) a PR titled _"chore(main): release vX.Y.Z"_. This PR bumps versions in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, and generates `CHANGELOG.md`.
-3. **Merge the Release PR** — when you're ready to cut a release, merge it.
-4. **Builds run automatically** — GitHub Actions builds for macOS (ARM + Intel), Windows, and Linux. This takes roughly 15-20 minutes.
-5. **Review the draft release** — Go to [GitHub Releases](https://github.com/protomated/feedglance/releases). The workflow creates a **draft** pre-release with all platform artifacts attached. Review, edit notes if needed, then click **Publish release**.
+1. **Push to `main`.** The `version` job scans commits since the last tag. If none are release-worthy, the workflow stops.
+2. **Version and tag.** It computes the next `YY.M.PATCH`, writes it to `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `Cargo.lock`, commits `chore(release): X [skip ci]`, and pushes the tag. It fails if the new version would not be higher than the last one, since the updater would ignore it.
+3. **Build.** macOS (Apple Silicon and Intel), Windows, and Linux build in parallel and upload to a draft release. This takes roughly 15–20 minutes.
+4. **Publish.** When every build succeeds, the release is published and marked **latest**, which is what the in-app updater reads.
+
+Notes are generated from the commits. Installed apps pick up the update on their next check.
+
+### Manual release
+
+Run the **Release** workflow from the Actions tab and enter a tag, e.g. `feedglance-v26.10.3`. It must follow `YY.M.PATCH`; anything else is rejected.
 
 ### What gets built
 
@@ -117,30 +144,8 @@ Other prefixes (`chore:`, `docs:`, `ci:`, `refactor:`, `test:`) do not trigger a
 |--------|--------|-----------|
 | `macos-latest` | `aarch64-apple-darwin` | `.dmg`, `.app` (Apple Silicon) |
 | `macos-latest` | `x86_64-apple-darwin` | `.dmg`, `.app` (Intel Mac) |
-| `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | `.deb`, `.AppImage` |
+| `ubuntu-22.04` | `x86_64-unknown-linux-gnu` | `.deb`, `.rpm`, `.AppImage` |
 | `windows-latest` | `x86_64-pc-windows-msvc` | `.msi`, `.exe` |
-
-### First-time setup (bootstrap)
-
-Before release-please can manage versions, you need to create a baseline tag so it knows where to start counting commits:
-
-```sh
-# 1. Commit all the release infrastructure (this should already be done)
-git add -A
-git commit -m "chore: add release-please and CI workflow"
-
-# 2. Create the baseline v0.1.0 tag on this commit
-git tag v0.1.0
-
-# 3. Push everything
-git push origin main --tags
-```
-
-After this, any conventional commits pushed to `main` will cause release-please to open a Release PR for the next version. You never need to manually create tags again.
-
-### Version scheme
-
-This project uses `v0.x.y` pre-release versioning. All releases are marked as pre-release until `v1.0.0`.
 
 ### GitHub repo settings
 
