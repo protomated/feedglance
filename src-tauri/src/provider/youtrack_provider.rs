@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 
-use super::actions::{render_mentions, ActionSource, AssigneeOption, StatusOption};
+use super::actions::{render_mentions, ActionSource, AssigneeOption, ItemDetails, StatusOption};
 use super::{
     Cursor, EventActor, EventKind, EventSubject, FetchResult, NormalizedEvent, NotificationSource,
     ProviderError, ProviderKind,
@@ -289,6 +289,57 @@ impl ActionSource for YouTrackProvider {
             .map(|_| ())
             .map_err(|e| ProviderError::Other(e.to_string()))
     }
+
+    async fn details(&self, item_id: &str) -> Result<ItemDetails, ProviderError> {
+        let issue = self
+            .client
+            .get_issue(item_id)
+            .await
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        Ok(issue_details(&issue))
+    }
+}
+
+/// Pick reply-context fields out of a `GET /api/issues/{id}` payload.
+///
+/// State, Priority and Assignee are matched by their default field names. A
+/// project that renamed them simply shows no chip, which beats guessing.
+fn issue_details(issue: &serde_json::Value) -> ItemDetails {
+    let text = |v: &serde_json::Value| {
+        v.as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    // Single-value fields hold an object, multi-value ones an array of them.
+    let value_name = |v: &serde_json::Value| -> Option<String> {
+        let one = |o: &serde_json::Value| {
+            text(&o["fullName"]).or_else(|| text(&o["name"])).or_else(|| text(&o["login"]))
+        };
+        match v {
+            serde_json::Value::Array(items) => {
+                let names: Vec<String> = items.iter().filter_map(one).collect();
+                (!names.is_empty()).then(|| names.join(", "))
+            }
+            serde_json::Value::Object(_) => one(v),
+            _ => None,
+        }
+    };
+    let field = |name: &str| {
+        issue["customFields"]
+            .as_array()?
+            .iter()
+            .find(|f| f["name"].as_str() == Some(name))
+            .and_then(|f| value_name(&f["value"]))
+    };
+
+    ItemDetails {
+        title: text(&issue["summary"]),
+        description: text(&issue["description"]),
+        state: field("State"),
+        priority: field("Priority"),
+        assignee: field("Assignee"),
+    }
 }
 
 /// Wrap a command value in braces when it contains spaces.
@@ -324,6 +375,37 @@ mod tests {
             activity_type: None,
             account_id: String::new(),
         }
+    }
+
+    #[test]
+    fn issue_details_picks_headline_fields() {
+        let issue = serde_json::json!({
+            "summary": "Fix login redirect loop",
+            "description": "  Users get bounced.  ",
+            "customFields": [
+                { "name": "State", "value": { "name": "In Progress" } },
+                { "name": "Priority", "value": { "name": "Major" } },
+                { "name": "Assignee", "value": [
+                    { "fullName": "Jane Okafor", "login": "jane" },
+                    { "login": "marco" }
+                ]},
+                { "name": "Estimation", "value": null }
+            ]
+        });
+        let d = issue_details(&issue);
+        assert_eq!(d.title.as_deref(), Some("Fix login redirect loop"));
+        assert_eq!(d.description.as_deref(), Some("Users get bounced."));
+        assert_eq!(d.state.as_deref(), Some("In Progress"));
+        assert_eq!(d.priority.as_deref(), Some("Major"));
+        assert_eq!(d.assignee.as_deref(), Some("Jane Okafor, marco"));
+    }
+
+    #[test]
+    fn issue_details_tolerates_missing_fields() {
+        let d = issue_details(&serde_json::json!({ "description": null, "customFields": [
+            { "name": "Assignee", "value": null }
+        ]}));
+        assert!(d.title.is_none() && d.description.is_none() && d.assignee.is_none());
     }
 
     #[test]

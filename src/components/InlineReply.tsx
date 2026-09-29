@@ -1,12 +1,31 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import { useAuthStore } from "../stores/auth";
-import { fetchAssignees, postComment, type AssigneeOption } from "../services/actions";
+import {
+  fetchAssignees,
+  fetchItemDetails,
+  postComment,
+  type AssigneeOption,
+  type ItemDetails,
+} from "../services/actions";
 import { useNotificationStore } from "../stores/notifications";
+import { useUiPrefsStore } from "../stores/uiPrefs";
+import { toPlainSnippet } from "../utils/plainText";
 import { showToast } from "./Toast";
+
+/**
+ * How long a details fetch may run before a placeholder appears. Faster loads
+ * fill in without flashing a skeleton first.
+ */
+const SKELETON_DELAY_MS = 1000;
 
 
 interface Props {
+  /** Provider-native ID, used for API calls. */
   issueId: string;
+  /** Human-facing ID (`PROJ-142`), used for everything the user reads. */
+  displayId?: string;
+  /** Title already known from the feed; shown before details arrive. */
+  title?: string;
   activityId?: string;
   projectId?: string;
   accountId?: string;
@@ -14,7 +33,17 @@ interface Props {
   onClose: () => void;
 }
 
-export function InlineReply({ issueId, activityId, projectId, accountId, isRead, onClose }: Props) {
+export function InlineReply({
+  issueId,
+  displayId,
+  title,
+  activityId,
+  projectId,
+  accountId,
+  isRead,
+  onClose,
+}: Props) {
+  const shownId = displayId ?? issueId;
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -37,6 +66,48 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
+
+  // Reply context: title, description snippet and headline fields.
+  const detailsOpen = useUiPrefsStore((s) => s.replyDetailsOpen);
+  const setDetailsOpen = useUiPrefsStore((s) => s.setReplyDetailsOpen);
+  const loadUiPrefs = useUiPrefsStore((s) => s.load);
+  const [details, setDetails] = useState<ItemDetails | null>(null);
+  const [detailsFailed, setDetailsFailed] = useState(false);
+  const [showSkeleton, setShowSkeleton] = useState(false);
+  const [descExpanded, setDescExpanded] = useState(false);
+  const [descOverflows, setDescOverflows] = useState(false);
+  const descRef = useRef<HTMLParagraphElement>(null);
+
+  useEffect(() => {
+    loadUiPrefs();
+  }, [loadUiPrefs]);
+
+  useEffect(() => {
+    if (!credentials) return;
+    let cancelled = false;
+    const timer = setTimeout(() => setShowSkeleton(true), SKELETON_DELAY_MS);
+    fetchItemDetails(credentials, issueId)
+      .then((d) => !cancelled && setDetails(d))
+      .catch(() => !cancelled && setDetailsFailed(true))
+      .finally(() => clearTimeout(timer));
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // `credentials` is a fresh object each render; the account + item pair is
+    // what identifies the fetch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId, issueId]);
+
+  const snippet = details?.description ? toPlainSnippet(details.description) : "";
+  const fullTitle = details?.title ?? title;
+  const detailsLoading = !details && !detailsFailed;
+
+  useLayoutEffect(() => {
+    if (!snippet || descExpanded) return;
+    const el = descRef.current;
+    if (el) setDescOverflows(el.scrollHeight > el.clientHeight + 1);
+  }, [snippet, descExpanded, detailsOpen]);
 
   // Fetch team members fresh when @ is typed
   const fetchTeam = useCallback(async () => {
@@ -172,7 +243,7 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
     setSubmitting(true);
     try {
       await postComment(credentials, issueId, serializeMentions(text.trim()));
-      showToast("success", `Comment posted on ${issueId}`);
+      showToast("success", `Comment posted on ${shownId}`);
       if (activityId && !isRead) {
         await markRead(activityId, accountId);
       }
@@ -222,65 +293,157 @@ export function InlineReply({ issueId, activityId, projectId, accountId, isRead,
 
   const showDropdown = mentionQuery !== null && (loadingMembers || filtered.length > 0);
 
-  return (
-    <div className="relative px-3 py-2 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-100 dark:border-gray-700">
-      <textarea
-        ref={textareaRef}
-        value={text}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        placeholder={`Reply to ${issueId}...`}
-        rows={3}
-        disabled={submitting}
-        className="w-full text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-900 dark:text-gray-100 placeholder-gray-400 disabled:opacity-50"
-      />
+  const metaChips = [details?.priority, details?.assignee && `Assignee: ${details.assignee}`].filter(
+    (c): c is string => !!c,
+  );
 
-      {/* @mention dropdown */}
-      {showDropdown && (
-        <div
-          ref={dropdownRef}
-          className="absolute left-3 right-3 bottom-full mb-1 z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-md shadow-lg overflow-hidden"
-        >
-          {loadingMembers && filtered.length === 0 ? (
-            <div className="px-2 py-2 text-[10px] text-gray-400 text-center">
-              Loading team...
+  return (
+    <div className="px-3 py-2 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-100 dark:border-gray-700">
+      {/* Context strip: what this reply is going to */}
+      <div className="flex items-center gap-1.5 min-w-0 mb-1.5 text-[11px] text-gray-500 dark:text-gray-400">
+        <span className="flex-shrink-0">Replying to</span>
+        <span className="flex-shrink-0 font-mono font-medium text-blue-600 dark:text-blue-400">
+          {shownId}
+        </span>
+        {fullTitle && (
+          <span className="truncate min-w-0 text-gray-900 dark:text-gray-100" title={fullTitle}>
+            {fullTitle}
+          </span>
+        )}
+        <span className="flex-1" />
+        {details?.state && (
+          <span className="flex-shrink-0 rounded px-1 py-[1px] text-[10px] bg-gray-200/70 text-gray-700 dark:bg-gray-700 dark:text-gray-200">
+            {details.state}
+          </span>
+        )}
+        {!detailsFailed && (
+          <button
+            type="button"
+            onClick={() => setDetailsOpen(!detailsOpen)}
+            aria-expanded={detailsOpen}
+            className="flex-shrink-0 text-[10px] font-medium text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
+          >
+            {detailsOpen ? "Hide \u25B4" : "Details \u25BE"}
+          </button>
+        )}
+      </div>
+
+      {/* Details card: full title, description snippet, headline fields */}
+      {detailsOpen && !detailsFailed && (
+        <div className="mb-1.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1.5 space-y-1 text-xs">
+          {fullTitle && (
+            <p className="font-medium text-gray-900 dark:text-gray-100 leading-snug line-clamp-2">
+              {fullTitle}
+            </p>
+          )}
+          {detailsLoading ? (
+            // Fixed-height slot so the textarea doesn't jump when text lands.
+            <div className="h-[3.75em] space-y-1.5 pt-0.5" aria-label="Loading description">
+              {showSkeleton && (
+                <>
+                  <div className="h-2 rounded bg-gray-200 dark:bg-gray-700 animate-pulse motion-reduce:animate-none" />
+                  <div className="h-2 rounded bg-gray-200 dark:bg-gray-700 animate-pulse motion-reduce:animate-none" />
+                  <div className="h-2 w-3/5 rounded bg-gray-200 dark:bg-gray-700 animate-pulse motion-reduce:animate-none" />
+                </>
+              )}
+            </div>
+          ) : snippet ? (
+            <div>
+              <p
+                ref={descRef}
+                className={`text-gray-500 dark:text-gray-400 leading-snug ${
+                  descExpanded ? "max-h-40 overflow-y-auto" : "line-clamp-3"
+                }`}
+              >
+                {snippet}
+              </p>
+              {(descOverflows || descExpanded) && (
+                <button
+                  type="button"
+                  onClick={() => setDescExpanded((prev) => !prev)}
+                  className="mt-0.5 text-[10px] font-medium text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
+                >
+                  {descExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
             </div>
           ) : (
-            <div className="max-h-36 overflow-y-auto">
-              {filtered.map((member, i) => (
-                <button
-                  key={member.id}
-                  onMouseDown={(e) => {
-                    e.preventDefault(); // prevent textarea blur
-                    insertMention(member);
-                  }}
-                  className={`w-full text-left px-2 py-1.5 text-xs flex items-center gap-2 transition-colors ${
-                    i === selectedIndex
-                      ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                      : "text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
-                  }`}
+            <p className="italic text-gray-400 dark:text-gray-500">No description</p>
+          )}
+          {metaChips.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {metaChips.map((chip) => (
+                <span
+                  key={chip}
+                  className="rounded px-1 py-[1px] text-[10px] bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
                 >
-                  {member.avatarUrl ? (
-                    <img
-                      src={member.avatarUrl}
-                      alt={member.name}
-                      className="w-4 h-4 rounded-full flex-shrink-0"
-                    />
-                  ) : (
-                    <div className="w-4 h-4 rounded-full bg-gray-300 dark:bg-gray-600 flex items-center justify-center text-[8px] font-medium text-gray-600 dark:text-gray-300 flex-shrink-0">
-                      {member.name.charAt(0).toUpperCase()}
-                    </div>
-                  )}
-                  <span className="truncate">{member.name}</span>
-                  <span className="text-[10px] text-gray-400 truncate">
-                    @{member.login}
-                  </span>
-                </button>
+                  {chip}
+                </span>
               ))}
             </div>
           )}
         </div>
       )}
+
+      <div className="relative">
+        <textarea
+          ref={textareaRef}
+          value={text}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          placeholder={`Reply to ${shownId}...`}
+          rows={3}
+          disabled={submitting}
+          className="w-full text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-900 dark:text-gray-100 placeholder-gray-400 disabled:opacity-50"
+        />
+
+        {/* @mention dropdown */}
+        {showDropdown && (
+          <div
+            ref={dropdownRef}
+            className="absolute left-0 right-0 bottom-full mb-1 z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-md shadow-lg overflow-hidden"
+          >
+            {loadingMembers && filtered.length === 0 ? (
+              <div className="px-2 py-2 text-[10px] text-gray-400 text-center">
+                Loading team...
+              </div>
+            ) : (
+              <div className="max-h-36 overflow-y-auto">
+                {filtered.map((member, i) => (
+                  <button
+                    key={member.id}
+                    onMouseDown={(e) => {
+                      e.preventDefault(); // prevent textarea blur
+                      insertMention(member);
+                    }}
+                    className={`w-full text-left px-2 py-1.5 text-xs flex items-center gap-2 transition-colors ${
+                      i === selectedIndex
+                        ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+                        : "text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                    }`}
+                  >
+                    {member.avatarUrl ? (
+                      <img
+                        src={member.avatarUrl}
+                        alt={member.name}
+                        className="w-4 h-4 rounded-full flex-shrink-0"
+                      />
+                    ) : (
+                      <div className="w-4 h-4 rounded-full bg-gray-300 dark:bg-gray-600 flex items-center justify-center text-[8px] font-medium text-gray-600 dark:text-gray-300 flex-shrink-0">
+                        {member.name.charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <span className="truncate">{member.name}</span>
+                    <span className="text-[10px] text-gray-400 truncate">
+                      @{member.login}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       <div className="flex items-center justify-between mt-1.5">
         <span className="text-[10px] text-gray-400">

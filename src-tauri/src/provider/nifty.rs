@@ -61,7 +61,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashMap;
 
-use super::actions::{render_mentions, ActionSource, AssigneeOption, StatusOption};
+use super::actions::{render_mentions, ActionSource, AssigneeOption, ItemDetails, StatusOption};
 use super::{
     Cursor, EventActor, EventKind, EventSubject, FetchResult, NormalizedEvent, NotificationSource,
     ProviderError, ProviderKind,
@@ -1190,6 +1190,48 @@ impl ActionSource for NiftyProvider {
         )
         .await
     }
+
+    async fn details(&self, item_id: &str) -> Result<ItemDetails, ProviderError> {
+        // A project discussion has no task behind it; its name already rides on
+        // the event, so there is nothing more to fetch.
+        if item_id.starts_with(DISCUSSION_ID_PREFIX) {
+            return Ok(ItemDetails::default());
+        }
+        let task: NiftyTaskDetail = self
+            .get(&format!("tasks/{}", urlencoding::encode(item_id)))
+            .await?;
+        Ok(task.into())
+    }
+}
+
+/// The `GET /tasks/{id}` fields reply context needs.
+///
+/// Status and assignee are left out: the task carries only a task-group ID and
+/// user IDs, and resolving either to a name costs another request against the
+/// team-shared rate limit. `completed` is on the payload, so that one is free.
+#[derive(Debug, Deserialize)]
+struct NiftyTaskDetail {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    completed: bool,
+}
+
+impl From<NiftyTaskDetail> for ItemDetails {
+    fn from(t: NiftyTaskDetail) -> Self {
+        let non_empty = |s: Option<String>| {
+            s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        };
+        ItemDetails {
+            title: non_empty(t.name),
+            description: non_empty(t.description),
+            state: t.completed.then(|| "Completed".to_string()),
+            priority: None,
+            assignee: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1211,6 +1253,28 @@ mod tests {
             labels: vec![],
             milestone: None,
         }
+    }
+
+    #[test]
+    fn task_detail_maps_to_item_details() {
+        let t: NiftyTaskDetail = serde_json::from_value(serde_json::json!({
+            "id": "abc", "nice_id": "142", "name": "Revenue chart",
+            "description": "Pull the chart first.\n", "completed": true
+        }))
+        .unwrap();
+        let d: ItemDetails = t.into();
+        assert_eq!(d.title.as_deref(), Some("Revenue chart"));
+        assert_eq!(d.description.as_deref(), Some("Pull the chart first."));
+        assert_eq!(d.state.as_deref(), Some("Completed"));
+    }
+
+    #[test]
+    fn empty_task_description_is_none() {
+        let t: NiftyTaskDetail =
+            serde_json::from_value(serde_json::json!({ "name": "x", "description": "  " })).unwrap();
+        let d: ItemDetails = t.into();
+        assert!(d.description.is_none());
+        assert!(d.state.is_none());
     }
 
     /// The exact call onboarding makes when a user connects a Nifty account:

@@ -421,6 +421,21 @@ async fn post_item_comment(
         .map_err(|e| e.to_string())
 }
 
+/// Title, description and headline fields for an item, for reply context.
+#[tauri::command]
+async fn get_item_details(
+    provider: Option<String>,
+    url: String,
+    token: String,
+    item_id: String,
+) -> Result<provider::actions::ItemDetails, String> {
+    let kind = parse_provider(provider)?;
+    action_source_for(kind, &url, &token)
+        .details(&item_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Statuses selectable for an item's project, for any provider.
 #[tauri::command]
 async fn get_item_statuses(
@@ -634,6 +649,7 @@ pub fn run() {
             execute_command,
             post_comment,
             post_item_comment,
+            get_item_details,
             get_item_statuses,
             set_item_status,
             get_item_assignees,

@@ -78,3 +78,37 @@ export async function assignItem(
 ): Promise<void> {
   await invoke("assign_item", { ...argsFor(account), itemId, assigneeId });
 }
+
+export interface ItemDetails {
+  title?: string | null;
+  /** Raw Markdown source; flatten with `toPlainSnippet` before display. */
+  description?: string | null;
+  state?: string | null;
+  priority?: string | null;
+  assignee?: string | null;
+}
+
+/**
+ * In-flight and settled detail lookups, keyed by provider host + item.
+ *
+ * Holding the promise (not the result) lets a hover prefetch and the reply box
+ * opening a moment later share one request. Session-scoped on purpose: the
+ * snippet is context, not a source of truth, so a stale description until the
+ * next launch is acceptable and saves Nifty's shared rate limit.
+ */
+const detailsCache = new Map<string, Promise<ItemDetails>>();
+
+export function fetchItemDetails(
+  account: Pick<Account, "url" | "token" | "provider">,
+  itemId: string,
+): Promise<ItemDetails> {
+  const key = `${account.provider ?? "youtrack"}:${account.url}:${itemId}`;
+  let pending = detailsCache.get(key);
+  if (!pending) {
+    pending = invoke<ItemDetails>("get_item_details", { ...argsFor(account), itemId });
+    // Drop failures so a later open can retry instead of caching the error.
+    pending.catch(() => detailsCache.delete(key));
+    detailsCache.set(key, pending);
+  }
+  return pending;
+}

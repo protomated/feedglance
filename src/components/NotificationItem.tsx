@@ -6,6 +6,7 @@ import { useAuthStore } from "../stores/auth";
 import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
 import { AssignDropdown } from "./AssignDropdown";
+import { fetchItemDetails } from "../services/actions";
 
 /** Format a timestamp as relative time (e.g. "2m ago", "3h ago"). */
 function relativeTime(timestamp: number): string {
@@ -421,7 +422,9 @@ function extractCommentText(activity: ActivityItem): string | null {
  * Resolves through nested issue/article when the direct target is a
  * comment, attachment, or VCS change.
  */
-function targetLabel(activity: ActivityItem): { label: string; id: string; type?: string } | null {
+function targetLabel(
+  activity: ActivityItem,
+): { label: string; id: string; type?: string; title?: string } | null {
   const t = activity.target;
   if (!t) return null;
 
@@ -430,13 +433,13 @@ function targetLabel(activity: ActivityItem): { label: string; id: string; type?
     if (t.targetType === "Article") {
       return { label: t.summary ?? t.idReadable, id: t.idReadable, type: "Article" };
     }
-    return { label: t.idReadable, id: t.idReadable, type: "Issue" };
+    return { label: t.idReadable, id: t.idReadable, type: "Issue", title: t.summary };
   }
 
   // Target is a comment/attachment/vcs-change — resolve through parent issue or article
   const issue = t.issue;
   if (issue?.idReadable) {
-    return { label: issue.idReadable, id: issue.idReadable, type: "Issue" };
+    return { label: issue.idReadable, id: issue.idReadable, type: "Issue", title: issue.summary };
   }
   const article = t.article;
   if (article) {
@@ -556,6 +559,20 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   const actionItemId = resolveActionItemId(activity) ?? issueId;
   const projectId = resolveProjectId(activity);
   const canAct = !!issueId; // Quick actions only work on issues
+  const getActionAccount = useAuthStore((s) => s.getActionAccount);
+
+  // Warm the reply-context cache when the user points at a row, so the
+  // description is usually there by the time the reply box opens.
+  const prefetchDetails = () => {
+    if (!canAct || !actionItemId) return;
+    const account = getActionAccount(activity.accountId);
+    if (account) fetchItemDetails(account, actionItemId).catch(() => {});
+  };
+
+  useEffect(() => {
+    if (isFocused) prefetchDetails();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFocused]);
 
   const handleOpenTarget = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -578,6 +595,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   return (
     <div data-activity-id={activity.id} className={isJustRead ? "animate-fade-out-read" : ""}>
       <div
+        onMouseEnter={prefetchDetails}
         className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors cursor-pointer ${
           isAssignmentToMe && !isRead ? "border-l-2 border-amber-400 dark:border-amber-500 pl-[10px]" : ""
         } ${
@@ -608,15 +626,23 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
         {/* Content */}
         <div className="flex-1 min-w-0">
           {resolved && (
-            <p className="mb-0.5">
+            <p className="mb-0.5 flex items-baseline gap-1.5 min-w-0">
               <span
                 onClick={handleOpenTarget}
-                className={`font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer ${
-                  resolved.type !== "Article" ? "font-mono" : ""
+                className={`flex-shrink-0 font-medium text-blue-600 dark:text-blue-400 hover:underline cursor-pointer ${
+                  resolved.type !== "Article" ? "font-mono" : "truncate"
                 }`}
               >
                 {resolved.label}
               </span>
+              {resolved.title && (
+                <span
+                  className="truncate min-w-0 font-medium text-gray-900 dark:text-gray-100"
+                  title={resolved.title}
+                >
+                  {resolved.title}
+                </span>
+              )}
             </p>
           )}
           <p className="text-gray-700 dark:text-gray-300 leading-snug">
@@ -798,6 +824,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
       {activeAction === "reply" && actionItemId && (
         <InlineReply
           issueId={actionItemId}
+          displayId={issueId ?? actionItemId}
+          title={resolved?.title}
           activityId={activity.id}
           projectId={projectId ?? undefined}
           accountId={activity.accountId}

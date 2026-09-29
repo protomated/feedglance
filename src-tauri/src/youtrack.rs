@@ -397,6 +397,38 @@ impl YouTrackClient {
         Ok(states)
     }
 
+    /// Fetch an issue's title, description and custom fields, for reply context.
+    ///
+    /// Returned untyped: custom-field values are polymorphic (single object,
+    /// array, or null depending on the field type), so the provider picks the
+    /// few it shows rather than modelling every shape here.
+    pub async fn get_issue(
+        &self,
+        issue_id: &str,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/api/issues/{}?fields=summary,description,customFields(name,value(name,fullName,login))",
+            self.base_url,
+            urlencoding::encode(issue_id)
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(ACCEPT, "application/json")
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Failed to fetch issue ({}): {}", status, body).into());
+        }
+
+        Ok(resp.json().await?)
+    }
+
     /// Fetch team members for a project.
     pub async fn get_project_team(
         &self,

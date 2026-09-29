@@ -110,6 +110,24 @@ pub struct AssigneeOption {
     pub avatar_url: String,
 }
 
+/// Read-only context about one item, shown above the reply box.
+///
+/// Fetched on demand rather than during polling: it is one request per item the
+/// user is about to reply to, where polling it would cost one per item per
+/// cycle — unaffordable on Nifty's team-shared rate limit. Every field is
+/// optional because providers expose different subsets.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDetails {
+    pub title: Option<String>,
+    /// Raw description source (Markdown on both providers). The UI flattens it
+    /// to plain text for the snippet.
+    pub description: Option<String>,
+    pub state: Option<String>,
+    pub priority: Option<String>,
+    pub assignee: Option<String>,
+}
+
 /// Mutations a provider can perform on a work item.
 ///
 /// Implementations receive provider-native IDs as supplied by
@@ -134,6 +152,9 @@ pub trait ActionSource: Send + Sync {
 
     /// Assign an item to a user. `assignee_id` comes from `assignees()`.
     async fn assign(&self, item_id: &str, assignee_id: &str) -> Result<(), ProviderError>;
+
+    /// Title, description and headline fields for an item, for reply context.
+    async fn details(&self, item_id: &str) -> Result<ItemDetails, ProviderError>;
 }
 
 #[cfg(test)]
