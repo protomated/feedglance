@@ -51,6 +51,12 @@ function formatShortcut(shortcut: string): string {
     .replace("Control", "Ctrl");
 }
 
+/** "A", "A and B", "A, B and C". */
+function joinNames(names: string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
+
 export function Settings({ onClose, globalShortcut, onChangeShortcut, availableUpdate, onUpdateDismissed, onCheckForUpdate }: SettingsProps) {
   const accounts = useAuthStore((s) => s.accounts);
   const connectionStatuses = useAuthStore((s) => s.connectionStatuses);
@@ -386,8 +392,8 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
             )}
           </div>
           <p className="text-xs text-gray-400">
-            Project notifications in your system tray, for{" "}
-            {PROVIDER_LIST.map((p) => p.name).join(" and ")}.
+            Notifications in your system tray for{" "}
+            {joinNames(PROVIDER_LIST.map((p) => p.name))}.
           </p>
           <p className="text-xs text-gray-400">
             by{" "}
