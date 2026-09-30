@@ -118,7 +118,7 @@ export function NotificationThread({
   return (
     <div className="border-l-2 border-transparent hover:border-gray-200 dark:hover:border-gray-700">
       {/* Thread header: the subject, once */}
-      <div className="group flex items-center gap-1.5 px-3 pt-2 pb-1 text-xs min-w-0">
+      <div className="group relative flex items-center gap-1.5 px-3 pt-2 pb-1 text-xs min-w-0">
         <span
           className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
             thread.hasUnread ? "bg-blue-500" : "bg-transparent"
@@ -144,10 +144,11 @@ export function NotificationThread({
           {unread.length > 0 && unread.length < count && ` · ${unread.length} new`}
         </span>
         <span className="flex-1" />
-        <span className="flex-shrink-0 text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:hidden">
-          {relativeTime(thread.latestTimestamp)}
+        {/* Same floating toolbar as rows, so hovering never reflows the header. */}
+        <span className="relative flex-shrink-0 text-gray-400 dark:text-gray-500 whitespace-nowrap">
+          <span className="group-hover:invisible">{relativeTime(thread.latestTimestamp)}</span>
         </span>
-        <div className="hidden group-hover:flex flex-shrink-0 items-center gap-0.5">
+        <div className="absolute top-1 right-2 z-10 hidden group-hover:flex items-center gap-0.5 rounded-md bg-white dark:bg-gray-800 px-0.5 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700">
           {actionItemId && (
             <button
               onClick={handleReply}

@@ -739,9 +739,13 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
           )}
         </div>
 
-        {/* Timestamp + hover actions */}
-        <div className="flex-shrink-0 flex items-start gap-1">
-          <span className="text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:hidden flex items-center gap-1">
+        {/* Timestamp + hover actions.
+            The actions float over the row instead of replacing the timestamp:
+            swapping them in changed the row's height and the text's width,
+            which made the whole feed jump on every hover. The timestamp stays
+            in layout (just invisible) so nothing reflows. */}
+        <div className="relative flex-shrink-0 flex items-start">
+          <span className="text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:invisible flex items-center gap-1">
             {isPinned && (
               <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" className="text-amber-500">
                 <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Z" />
@@ -752,7 +756,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
 
           {/* Action buttons — shown on hover */}
           {canAct && (
-            <div className="hidden group-hover:flex items-center gap-0.5">
+            <div className="absolute -top-1 right-0 z-10 hidden group-hover:flex items-center gap-0.5 rounded-md bg-white dark:bg-gray-800 px-0.5 shadow-sm ring-1 ring-gray-200 dark:ring-gray-700">
               {/* Reply */}
               <button
                 onClick={(e) => {
