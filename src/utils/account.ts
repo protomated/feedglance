@@ -39,7 +39,11 @@ export async function generateAccountId(
   provider: ProviderKind = "youtrack",
   token?: string,
 ): Promise<string> {
-  const key = provider === "nifty" ? `nifty:${token ?? ""}` : url;
+  // Quo keys the account on the user's email (stored in `url`): one API key
+  // serves the whole workspace, so the key can't tell two users apart, and
+  // keying on the email keeps the ID stable when the key is rotated.
+  const key =
+    provider === "nifty" ? `nifty:${token ?? ""}` : provider === "quo" ? `quo:${url}` : url;
   return hash12(key.toLowerCase().replace(/\/+$/, ""));
 }
 
@@ -81,7 +85,11 @@ export function labelForAccount(
   provider: ProviderKind | undefined,
   userName?: string,
 ): string {
-  const providerName = provider === "nifty" ? "Nifty" : "YouTrack";
+  const providerName =
+    provider === "nifty" ? "Nifty" : provider === "quo" ? "Quo" : "YouTrack";
+
+  // Quo's `url` is an email, not a host.
+  if (provider === "quo") return url ? `Quo · ${url}` : providerName;
 
   if (url) {
     let hostname = "";

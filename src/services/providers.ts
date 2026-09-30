@@ -34,7 +34,31 @@ export interface ProviderDescriptor {
    * valid result for providers where the host is optional.
    */
   normalizeHost(input: string): { value: string } | { error: string };
+  /**
+   * Which quick actions the provider's items support. The feed shows only
+   * these, rather than guessing from whether an event has a project.
+   */
+  capabilities: ProviderCapabilities;
 }
+
+export interface ProviderCapabilities {
+  status: boolean;
+  assign: boolean;
+  /** @-mentions in replies. */
+  mentions: boolean;
+  /**
+   * Replies can be handed off to the provider's own app instead of posted
+   * through the API. True for Quo, where each API send costs credits.
+   */
+  externalReply: boolean;
+}
+
+const WORK_ITEM_CAPABILITIES: ProviderCapabilities = {
+  status: true,
+  assign: true,
+  mentions: true,
+  externalReply: false,
+};
 
 export const PROVIDERS: Record<ProviderKind, ProviderDescriptor> = {
   youtrack: {
@@ -57,6 +81,7 @@ export const PROVIDERS: Record<ProviderKind, ProviderDescriptor> = {
       }
       return { value: normalizeUrl(input) };
     },
+    capabilities: WORK_ITEM_CAPABILITIES,
   },
 
   nifty: {
@@ -84,12 +109,44 @@ export const PROVIDERS: Record<ProviderKind, ProviderDescriptor> = {
       }
       return { value: host };
     },
+    capabilities: WORK_ITEM_CAPABILITIES,
+  },
+
+  quo: {
+    kind: "quo",
+    name: "Quo",
+    tagline: "Quo (formerly OpenPhone) text messages",
+    // Not a host: Quo API keys cover the whole workspace, so the email says
+    // which user's lines to watch and who replies are sent as.
+    hostLabel: "Your Quo email",
+    hostPlaceholder: "you@company.com",
+    hostRequired: true,
+    hostHelp:
+      "The email you sign in to Quo with. API keys are created by a workspace owner or admin.",
+    tokenLabel: "API Key",
+    tokenPlaceholder: "Your Quo API key",
+    tokenDocsUrl: "https://support.quo.com/core-concepts/integrations/api",
+    tokenDocsLabel: "How to get an API key",
+    normalizeHost(input: string) {
+      const email = input.trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return { error: "Enter the email you sign in to Quo with" };
+      }
+      return { value: email };
+    },
+    capabilities: {
+      status: false,
+      assign: false,
+      mentions: false,
+      externalReply: true,
+    },
   },
 };
 
 export const PROVIDER_LIST: ProviderDescriptor[] = [
   PROVIDERS.youtrack,
   PROVIDERS.nifty,
+  PROVIDERS.quo,
 ];
 
 /** Resolve a descriptor, defaulting to YouTrack for accounts saved without one. */

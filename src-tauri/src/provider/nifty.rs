@@ -1230,6 +1230,7 @@ impl From<NiftyTaskDetail> for ItemDetails {
             state: t.completed.then(|| "Completed".to_string()),
             priority: None,
             assignee: None,
+            thread: None,
         }
     }
 }

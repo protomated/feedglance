@@ -7,6 +7,9 @@ import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
 import { AssignDropdown } from "./AssignDropdown";
 import { fetchItemDetails } from "../services/actions";
+import { providerOf } from "../services/providers";
+import { useUiPrefsStore } from "../stores/uiPrefs";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 /** Format a timestamp as relative time (e.g. "2m ago", "3h ago"). */
 function relativeTime(timestamp: number): string {
@@ -198,6 +201,11 @@ function oldNew(oldName: string | null, newName: string | null, clearedLabel: st
 function describeActivity(activity: ActivityItem, currentUserLogin: string | null, currentUserId: string | null): DescriptionResult {
   const categoryId = activity.category?.id;
   const fieldName = activity.field?.name ?? "";
+
+  // Text messages travel as comments in the legacy shape, so check first.
+  if (activity.kind === "message") {
+    return { node: "texted", isAssignmentToMe: false, isUnassigned: false };
+  }
 
   if (categoryId === "CommentsCategory") {
     return { node: "commented", isAssignmentToMe: false, isUnassigned: false };
@@ -514,6 +522,9 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   const [commentExpanded, setCommentExpanded] = useState(false);
   const [commentOverflows, setCommentOverflows] = useState(false);
   const commentRef = useRef<HTMLParagraphElement>(null);
+  // The keyboard handler is registered once; the ref lets it reach the latest
+  // `toggleAction`, which depends on per-render reply settings.
+  const toggleActionRef = useRef<(action: ActiveAction) => void>(() => {});
   const muteIssue = useFilterStore((s) => s.muteIssue);
   const pinActivity = useNotificationStore((s) => s.pinActivity);
   const unpinActivity = useNotificationStore((s) => s.unpinActivity);
@@ -524,7 +535,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
       const detail = (e as CustomEvent).detail;
       if (detail?.activityId === activity.id) {
         const action = detail.action as ActiveAction;
-        if (action) setActiveAction((prev) => (prev === action ? null : action));
+        if (action) toggleActionRef.current(action);
       }
     };
     window.addEventListener("kb-action", handler);
@@ -560,6 +571,15 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   const projectId = resolveProjectId(activity);
   const canAct = !!issueId; // Quick actions only work on issues
   const getActionAccount = useAuthStore((s) => s.getActionAccount);
+  const capabilities = providerOf(activityAccount?.provider).capabilities;
+  const quoSendInApp = useUiPrefsStore((s) => s.quoSendInApp);
+  const loadUiPrefs = useUiPrefsStore((s) => s.load);
+  useEffect(() => {
+    loadUiPrefs();
+  }, [loadUiPrefs]);
+  // Quo replies go to the Quo app unless the user opted in to paid API sends.
+  const replyExternally = capabilities.externalReply && !quoSendInApp && !!activity.url;
+  const isMessage = activity.kind === "message";
 
   // Warm the reply-context cache when the user points at a row, so the
   // description is usually there by the time the reply box opens.
@@ -589,7 +609,20 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   };
 
   const toggleAction = (action: ActiveAction) => {
+    if (action === "reply" && replyExternally) {
+      replyInProviderApp();
+      return;
+    }
     setActiveAction((prev) => (prev === action ? null : action));
+  };
+
+  toggleActionRef.current = (action) => toggleAction(action);
+
+  /** Hand the reply off to the provider's own app (free, unlike an API send). */
+  const replyInProviderApp = () => {
+    if (!activity.url) return;
+    openUrl(activity.url);
+    if (!isRead) onMarkRead(activity.id);
   };
 
   return (
@@ -625,7 +658,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
 
         {/* Content */}
         <div className="flex-1 min-w-0">
-          {resolved && (
+          {/* A 1:1 text's conversation is its sender; the header would repeat the name. */}
+          {resolved && !(isMessage && resolved.label === authorName) && (
             <p className="mb-0.5 flex items-baseline gap-1.5 min-w-0">
               <span
                 onClick={handleOpenTarget}
@@ -701,7 +735,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
                   e.stopPropagation();
                   toggleAction("reply");
                 }}
-                title="Reply"
+                title={replyExternally ? "Reply in Quo" : "Reply"}
                 className={`p-1 rounded transition-colors ${
                   activeAction === "reply"
                     ? "bg-blue-100 dark:bg-blue-900/40 text-blue-600"
@@ -714,7 +748,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
               </button>
 
               {/* Status */}
-              {projectId && actionItemId && (
+              {capabilities.status && projectId && actionItemId && (
                 <div className="relative">
                   <button
                     onClick={(e) => {
@@ -745,7 +779,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
               )}
 
               {/* Assign */}
-              {projectId && actionItemId && (
+              {capabilities.assign && projectId && actionItemId && (
                 <div className="relative">
                   <button
                     onClick={(e) => {
@@ -807,7 +841,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
                     e.stopPropagation();
                     muteIssue(issueId);
                   }}
-                  title="Mute this issue"
+                  title={isMessage ? "Mute this conversation" : "Mute this issue"}
                   className="p-1 rounded text-gray-400 hover:text-orange-500 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                 >
                   <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
@@ -830,6 +864,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
           projectId={projectId ?? undefined}
           accountId={activity.accountId}
           isRead={isRead}
+          mentions={capabilities.mentions}
+          isConversation={isMessage}
           onClose={() => setActiveAction(null)}
         />
       )}

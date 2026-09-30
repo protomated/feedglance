@@ -126,6 +126,25 @@ pub struct ItemDetails {
     pub state: Option<String>,
     pub priority: Option<String>,
     pub assignee: Option<String>,
+    /// Recent messages, oldest first, for providers whose items are
+    /// conversations (Quo). The reply panel shows these instead of a
+    /// description.
+    pub thread: Option<Vec<ThreadMessage>>,
+}
+
+/// One message in a conversation thread, for reply context.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessage {
+    /// Display name, "You", or the sender's phone number for incoming texts
+    /// (the UI substitutes the conversation's contact name).
+    pub author: String,
+    pub text: String,
+    /// Unix ms, UTC.
+    pub timestamp: i64,
+    pub outgoing: bool,
+    /// Delivery status for outgoing messages (`delivered`, `undelivered`, …).
+    pub status: Option<String>,
 }
 
 /// Mutations a provider can perform on a work item.

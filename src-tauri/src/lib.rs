@@ -22,6 +22,7 @@ fn parse_provider(tag: Option<String>) -> Result<ProviderKind, String> {
     match tag.as_deref() {
         None | Some("") | Some("youtrack") => Ok(ProviderKind::YouTrack),
         Some("nifty") => Ok(ProviderKind::Nifty),
+        Some("quo") => Ok(ProviderKind::Quo),
         Some(other) => Err(format!("Unknown provider: {}", other)),
     }
 }
@@ -34,7 +35,8 @@ async fn validate_connection(url: String, token: String) -> Result<youtrack::Use
 
 /// Validate credentials for any provider, returning the current user's ID.
 ///
-/// Nifty ignores `url` — its API host is fixed.
+/// Nifty ignores `url` — its API host is fixed. Quo reads it as the user's
+/// Quo email and returns that user's `US…` ID.
 #[tauri::command]
 async fn validate_provider(
     provider: Option<String>,
@@ -48,6 +50,7 @@ async fn validate_provider(
             Box::new(provider::youtrack_provider::YouTrackProvider::new(&url, &token, ""))
         }
         ProviderKind::Nifty => Box::new(provider::nifty::NiftyProvider::new(&token, "")),
+        ProviderKind::Quo => Box::new(provider::quo::QuoProvider::new(&url, &token, "")),
     };
     source.validate().await.map_err(|e| e.to_string())
 }
@@ -403,6 +406,9 @@ fn action_source_for(
             url, token, "",
         )),
         ProviderKind::Nifty => Box::new(provider::nifty::NiftyProvider::new(token, "")),
+        // `url` is the user's Quo email; the provider resolves it to the user
+        // that replies are sent as.
+        ProviderKind::Quo => Box::new(provider::quo::QuoProvider::new(url, token, "")),
     }
 }
 

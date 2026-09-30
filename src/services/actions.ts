@@ -86,6 +86,18 @@ export interface ItemDetails {
   state?: string | null;
   priority?: string | null;
   assignee?: string | null;
+  /** Recent messages, oldest first, for conversation items (Quo). */
+  thread?: ThreadMessage[] | null;
+}
+
+/** One message in a conversation, mirroring `ThreadMessage` in actions.rs. */
+export interface ThreadMessage {
+  author: string;
+  text: string;
+  /** Unix ms, UTC. */
+  timestamp: number;
+  outgoing: boolean;
+  status?: string | null;
 }
 
 /**
@@ -98,6 +110,8 @@ export interface ItemDetails {
  */
 const detailsCache = new Map<string, Promise<ItemDetails>>();
 
+const CONVERSATION_TTL_MS = 30_000;
+
 export function fetchItemDetails(
   account: Pick<Account, "url" | "token" | "provider">,
   itemId: string,
@@ -109,6 +123,11 @@ export function fetchItemDetails(
     // Drop failures so a later open can retry instead of caching the error.
     pending.catch(() => detailsCache.delete(key));
     detailsCache.set(key, pending);
+    // A conversation's thread goes stale as soon as anyone texts, so it is
+    // only shared between a hover prefetch and the reply box opening.
+    if (account.provider === "quo") {
+      setTimeout(() => detailsCache.delete(key), CONVERSATION_TTL_MS);
+    }
   }
   return pending;
 }

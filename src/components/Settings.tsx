@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAuthStore } from "../stores/auth";
+import { useUiPrefsStore } from "../stores/uiPrefs";
 import { PROVIDER_LIST, PROVIDERS, providerOf } from "../services/providers";
 import type { ProviderKind } from "../types/youtrack";
 import { DEFAULT_SHORTCUT } from "../App";
@@ -60,6 +61,12 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
   const disconnect = useAuthStore((s) => s.disconnect);
 
   const [autostart, setAutostart] = useState(false);
+  const quoSendInApp = useUiPrefsStore((s) => s.quoSendInApp);
+  const setQuoSendInApp = useUiPrefsStore((s) => s.setQuoSendInApp);
+  const loadUiPrefs = useUiPrefsStore((s) => s.load);
+  useEffect(() => {
+    loadUiPrefs();
+  }, [loadUiPrefs]);
   const [recording, setRecording] = useState(false);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [appVersion, setAppVersion] = useState<string>("");
@@ -189,7 +196,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
         {/* Add account form */}
         {showAddAccount && (
           <form onSubmit={handleAddAccount} className="mb-3 p-2.5 rounded-lg bg-gray-50 dark:bg-gray-800 space-y-2">
-            <div className="grid grid-cols-2 gap-1.5" role="radiogroup">
+            <div className="grid grid-cols-3 gap-1.5" role="radiogroup">
               {PROVIDER_LIST.map((p) => {
                 const selected = p.kind === newProvider;
                 return (
@@ -334,6 +341,35 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
             />
           </button>
         </label>
+
+        {/* Quo replies: API send (paid) vs. open in Quo (free) */}
+        {accounts.some((a) => a.provider === "quo") && (
+          <label className="flex items-center justify-between gap-3 px-3 py-1.5 rounded-md hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer">
+            <div>
+              <span className="text-sm text-gray-700 dark:text-gray-300">Send Quo replies from Feedglance</span>
+              <p className="text-[10px] text-gray-400 mt-0.5">
+                {quoSendInApp
+                  ? "Sent through the Quo API — $0.01 per segment from your Quo credits."
+                  : "Off: Reply opens the conversation in Quo, which costs nothing."}
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={quoSendInApp}
+              onClick={() => setQuoSendInApp(!quoSendInApp)}
+              className={`relative flex-shrink-0 inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                quoSendInApp ? "bg-blue-600" : "bg-gray-300 dark:bg-gray-600"
+              }`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                  quoSendInApp ? "translate-x-4" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </label>
+        )}
       </div>
 
       {/* About */}

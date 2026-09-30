@@ -29,6 +29,9 @@ const KIND_TO_CATEGORY: Record<EventKind, string> = {
   attachment: "AttachmentsCategory",
   sprint: "SprintCategory",
   vcsChange: "VcsChangeCategory",
+  // Rendered like a comment (body under the author), but `describeActivity`
+  // checks `kind` first so the verb reads "texted".
+  message: "CommentsCategory",
   other: "CustomFieldCategory",
 };
 
@@ -70,7 +73,7 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
       }
     : undefined;
 
-  const isComment = event.kind === "comment";
+  const isComment = event.kind === "comment" || event.kind === "message";
 
   return {
     id: event.id,

@@ -6,7 +6,7 @@
  * returns for every provider.
  */
 
-export type ProviderKind = "youtrack" | "nifty";
+export type ProviderKind = "youtrack" | "nifty" | "quo";
 
 /** Provider-independent event category. */
 export type EventKind =
@@ -18,6 +18,7 @@ export type EventKind =
   | "attachment"
   | "sprint"
   | "vcsChange"
+  | "message"
   | "other";
 
 export interface EventActor {
@@ -84,6 +85,7 @@ export const EVENT_KIND_LABELS: Record<EventKind, string> = {
   attachment: "Attachment",
   sprint: "Sprint",
   vcsChange: "VCS change",
+  message: "Text message",
   other: "Update",
 };
 

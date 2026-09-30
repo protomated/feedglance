@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod actions;
 pub mod nifty;
+pub mod quo;
 pub mod youtrack_provider;
 
 /// Which backend an account talks to.
@@ -30,6 +31,7 @@ pub mod youtrack_provider;
 pub enum ProviderKind {
     YouTrack,
     Nifty,
+    Quo,
 }
 
 impl ProviderKind {
@@ -37,6 +39,7 @@ impl ProviderKind {
         match self {
             ProviderKind::YouTrack => "youtrack",
             ProviderKind::Nifty => "nifty",
+            ProviderKind::Quo => "quo",
         }
     }
 }
@@ -57,6 +60,9 @@ pub enum EventKind {
     Attachment,
     Sprint,
     VcsChange,
+    /// A text message (Quo SMS). Not a comment: there is no work item, and
+    /// the feed renders it as a conversation rather than an activity.
+    Message,
     /// Recognized but uncategorized — still shown, never filtered out silently.
     Other,
 }

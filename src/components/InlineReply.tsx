@@ -11,6 +11,7 @@ import { useNotificationStore } from "../stores/notifications";
 import { useUiPrefsStore } from "../stores/uiPrefs";
 import { toPlainSnippet } from "../utils/plainText";
 import { showToast } from "./Toast";
+import type { ThreadMessage } from "../services/actions";
 
 /**
  * How long a details fetch may run before a placeholder appears. Faster loads
@@ -30,6 +31,13 @@ interface Props {
   projectId?: string;
   accountId?: string;
   isRead?: boolean;
+  /** Whether the provider supports @-mentions. */
+  mentions?: boolean;
+  /**
+   * The item is a text conversation (Quo): show its recent messages instead of
+   * a description, and word the UI as sending a text.
+   */
+  isConversation?: boolean;
   onClose: () => void;
 }
 
@@ -41,6 +49,8 @@ export function InlineReply({
   projectId,
   accountId,
   isRead,
+  mentions = true,
+  isConversation = false,
   onClose,
 }: Props) {
   const shownId = displayId ?? issueId;
@@ -188,6 +198,7 @@ export function InlineReply({
       // Only trigger if no spaces in the query (still typing the mention)
       if (/\s/.test(charBefore) || atIndex === 0) {
         if (!queryText.includes(" ")) {
+          if (!mentions) return;
           if (mentionQuery === null && projectId) {
             // Just started a mention — fetch team fresh
             fetchTeam();
@@ -243,14 +254,15 @@ export function InlineReply({
     setSubmitting(true);
     try {
       await postComment(credentials, issueId, serializeMentions(text.trim()));
-      showToast("success", `Comment posted on ${shownId}`);
+      showToast("success", isConversation ? `Text sent to ${shownId}` : `Comment posted on ${shownId}`);
       if (activityId && !isRead) {
         await markRead(activityId, accountId);
       }
       onClose();
       await refresh();
     } catch (e) {
-      showToast("error", `Failed to comment: ${e instanceof Error ? e.message : String(e)}`);
+      const reason = e instanceof Error ? e.message : String(e);
+      showToast("error", isConversation ? `Text not sent: ${reason}` : `Failed to comment: ${reason}`);
     } finally {
       setSubmitting(false);
     }
@@ -323,13 +335,34 @@ export function InlineReply({
             aria-expanded={detailsOpen}
             className="flex-shrink-0 text-[10px] font-medium text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
           >
-            {detailsOpen ? "Hide \u25B4" : "Details \u25BE"}
+            {detailsOpen ? "Hide \u25B4" : isConversation ? "Thread \u25BE" : "Details \u25BE"}
           </button>
         )}
       </div>
 
+      {/* Conversation thread: the last few texts, both directions */}
+      {detailsOpen && !detailsFailed && isConversation && (
+        <div className="mb-1.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1.5 text-xs">
+          {detailsLoading ? (
+            <div className="h-[3.75em] space-y-1.5 pt-0.5" aria-label="Loading conversation">
+              {showSkeleton && (
+                <>
+                  <div className="h-2 rounded bg-gray-200 dark:bg-gray-700 animate-pulse motion-reduce:animate-none" />
+                  <div className="h-2 w-4/5 ml-auto rounded bg-gray-200 dark:bg-gray-700 animate-pulse motion-reduce:animate-none" />
+                  <div className="h-2 w-3/5 rounded bg-gray-200 dark:bg-gray-700 animate-pulse motion-reduce:animate-none" />
+                </>
+              )}
+            </div>
+          ) : details?.thread && details.thread.length > 0 ? (
+            <ThreadView messages={details.thread} contactLabel={shownId} />
+          ) : (
+            <p className="italic text-gray-400 dark:text-gray-500">No messages</p>
+          )}
+        </div>
+      )}
+
       {/* Details card: full title, description snippet, headline fields */}
-      {detailsOpen && !detailsFailed && (
+      {detailsOpen && !detailsFailed && !isConversation && (
         <div className="mb-1.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 px-2 py-1.5 space-y-1 text-xs">
           {fullTitle && (
             <p className="font-medium text-gray-900 dark:text-gray-100 leading-snug line-clamp-2">
@@ -391,7 +424,7 @@ export function InlineReply({
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder={`Reply to ${shownId}...`}
+          placeholder={isConversation ? `Text ${shownId}...` : `Reply to ${shownId}...`}
           rows={3}
           disabled={submitting}
           className="w-full text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-900 dark:text-gray-100 placeholder-gray-400 disabled:opacity-50"
@@ -449,7 +482,8 @@ export function InlineReply({
         <span className="text-[10px] text-gray-400">
           {navigator.platform.includes("Mac") ? "\u2318" : "Ctrl"}+Enter to send
           &middot; Esc to cancel
-          {projectId && " \u00b7 @ to mention"}
+          {mentions && projectId && " \u00b7 @ to mention"}
+          {isConversation && " \u00b7 sends via Quo API (uses credits)"}
         </span>
         <div className="flex gap-1.5">
           <button
@@ -468,6 +502,58 @@ export function InlineReply({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Short clock time for a message, with the date when it isn't today. */
+function messageTime(ms: number): string {
+  const d = new Date(ms);
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString()
+    ? time
+    : `${d.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
+
+/**
+ * A conversation's recent texts as chat bubbles: theirs on the left, your
+ * team's on the right. Scrolled to the newest on open.
+ */
+function ThreadView({ messages, contactLabel }: { messages: ThreadMessage[]; contactLabel: string }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  // Scroll the box itself; scrollIntoView would also move the feed around it.
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  // Incoming authors arrive as phone numbers; in a 1:1 thread the contact's
+  // name is already known from the feed.
+  const isOneToOne = !contactLabel.includes(",");
+  const incomingName = (author: string) =>
+    isOneToOne && /^\+?\d[\d\s()-]*$/.test(author) ? contactLabel : author;
+
+  return (
+    <div ref={boxRef} className="max-h-48 overflow-y-auto space-y-1.5 pr-0.5">
+      {messages.map((m, i) => (
+        <div key={i} className={`flex flex-col ${m.outgoing ? "items-end" : "items-start"}`}>
+          <div
+            className={`max-w-[85%] rounded-lg px-2 py-1 leading-snug whitespace-pre-wrap break-words ${
+              m.outgoing
+                ? "bg-blue-600 text-white"
+                : "bg-gray-100 text-gray-900 dark:bg-gray-800 dark:text-gray-100"
+            }`}
+          >
+            {m.text}
+          </div>
+          <span className="mt-0.5 text-[10px] text-gray-400 dark:text-gray-500">
+            {m.outgoing ? m.author : incomingName(m.author)} · {messageTime(m.timestamp)}
+            {m.outgoing && m.status === "undelivered" && (
+              <span className="text-red-500"> · not delivered</span>
+            )}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }

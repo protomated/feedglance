@@ -1,5 +1,5 @@
 /** Which PM backend an account talks to. */
-export type ProviderKind = "youtrack" | "nifty";
+export type ProviderKind = "youtrack" | "nifty" | "quo";
 
 export interface UserInfo {
   id: string;
@@ -24,6 +24,9 @@ export interface Account {
    * Nifty: the workspace origin used for deep links (`{slug}.nifty.pm` or a
    * CNAME custom domain). Optional, and NOT an API host — Nifty's API lives at
    * a fixed address. Empty simply means events carry no deep link.
+   *
+   * Quo: the user's Quo login email. The API key is workspace-wide, so this is
+   * what identifies whose inbox to show and who in-app replies are sent as.
    */
   url: string;
   token: string;

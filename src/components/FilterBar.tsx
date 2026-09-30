@@ -22,6 +22,7 @@ import {
  */
 const ALL_KINDS: EventKind[] = [
   "comment",
+  "message",
   "assignment",
   "statusChange",
   "itemCreated",

@@ -188,7 +188,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       throw new Error(
         provider === "nifty"
           ? "This Nifty workspace is already connected."
-          : "This YouTrack instance is already connected.",
+          : provider === "quo"
+            ? "This Quo user is already connected."
+            : "This YouTrack instance is already connected.",
       );
     }
 

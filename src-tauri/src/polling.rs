@@ -6,6 +6,7 @@ use tokio::time::{sleep, Duration};
 use tauri::{AppHandle, Emitter};
 
 use crate::provider::nifty::NiftyProvider;
+use crate::provider::quo::QuoProvider;
 use crate::provider::youtrack_provider::YouTrackProvider;
 use crate::provider::{
     Cursor, EventKind, NormalizedEvent, NotificationSource, ProviderError, ProviderKind,
@@ -33,6 +34,10 @@ const IDLE_AFTER: Duration = Duration::from_secs(5 * 60);
 /// the team-shared limit for other clients. Steady state stays near-zero
 /// message calls, so this ceiling is only reached while catching up.
 const CALL_BUDGET: u32 = 100;
+
+/// Up to this many new texts in one poll get a notification each, with sender
+/// and message; more than that fall back to the batch count.
+const MAX_INDIVIDUAL_TEXTS: usize = 3;
 
 /// Max events retained per account before pruning.
 const MAX_EVENTS: usize = 500;
@@ -125,6 +130,13 @@ impl AccountPollingState {
                 &self.current_user_id,
                 &self.url,
             )),
+            // For Quo, `url` holds the user's Quo login email: the API key is
+            // workspace-wide, so the email is what says whose inbox this is.
+            ProviderKind::Quo => Box::new(QuoProvider::new(
+                &self.url,
+                &self.token,
+                &self.current_user_id,
+            )),
         }
     }
 
@@ -136,6 +148,7 @@ impl AccountPollingState {
         match self.provider {
             ProviderKind::YouTrack => !self.url.is_empty(),
             ProviderKind::Nifty => true,
+            ProviderKind::Quo => !self.url.is_empty(),
         }
     }
 }
@@ -464,7 +477,9 @@ pub fn start_polling_loop(app_handle: AppHandle, state: SharedPollingState, _can
                         // stops holding, this must move below the notifications.
                         if outcome.new_count == 0 {
                             debug_assert!(
-                                outcome.notifiable_count == 0 && outcome.assigned_to_me.is_empty(),
+                                outcome.notifiable_count == 0
+                                    && outcome.assigned_to_me.is_empty()
+                                    && outcome.texts.is_empty(),
                                 "no new events but notifications pending — \
                                  the early-continue would swallow them"
                             );
@@ -480,10 +495,21 @@ pub fn start_polling_loop(app_handle: AppHandle, state: SharedPollingState, _can
                         );
 
                         if !target.is_initial {
-                            if outcome.notifiable_count > 0 {
+                            // A text is only worth an alert if you can read it
+                            // there, so a few get one each; a burst is batched.
+                            let mut batch = outcome.notifiable_count;
+                            if !outcome.texts.is_empty()
+                                && outcome.texts.len() <= MAX_INDIVIDUAL_TEXTS
+                            {
+                                for (sender, body) in &outcome.texts {
+                                    send_titled_notification(&app_handle, sender, body);
+                                }
+                                batch -= outcome.texts.len() as u32;
+                            }
+                            if batch > 0 {
                                 send_batch_notification(
                                     &app_handle,
-                                    outcome.notifiable_count,
+                                    batch,
                                     target.source.kind(),
                                 );
                             }
@@ -527,6 +553,9 @@ struct ApplyOutcome {
     new_count: u32,
     notifiable_count: u32,
     assigned_to_me: Vec<(String, Option<String>)>,
+    /// New, unmuted text messages as (sender, body). Each is also counted in
+    /// `notifiable_count`.
+    texts: Vec<(String, String)>,
 }
 
 /// Merge a fetch result into account state under a single write lock.
@@ -545,6 +574,7 @@ async fn apply_events(
     let mut new_count = 0u32;
     let mut notifiable_count = 0u32;
     let mut assigned_to_me = Vec::new();
+    let mut texts = Vec::new();
 
     for mut event in result.events {
         event.account_id = target.account_id.clone();
@@ -561,6 +591,15 @@ async fn apply_events(
                 event.subject.display_id.clone(),
                 event.subject.title.clone(),
             ));
+        }
+
+        if !is_muted && event.kind == EventKind::Message {
+            let sender = event
+                .actor
+                .as_ref()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| event.subject.display_id.clone());
+            texts.push((sender, event.text.clone().unwrap_or_default()));
         }
 
         acct.seen_ids.insert(event.id.clone());
@@ -582,6 +621,7 @@ async fn apply_events(
         new_count,
         notifiable_count,
         assigned_to_me,
+        texts,
     })
 }
 
@@ -629,6 +669,7 @@ fn send_batch_notification(app_handle: &AppHandle, count: u32, provider: Provide
     let name = match provider {
         ProviderKind::YouTrack => "YouTrack",
         ProviderKind::Nifty => "Nifty",
+        ProviderKind::Quo => "Quo",
     };
     let body = format!(
         "{} new notification{} in {}",

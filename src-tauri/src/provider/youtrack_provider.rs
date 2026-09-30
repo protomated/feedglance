@@ -339,6 +339,7 @@ fn issue_details(issue: &serde_json::Value) -> ItemDetails {
         state: field("State"),
         priority: field("Priority"),
         assignee: field("Assignee"),
+        thread: None,
     }
 }
 

@@ -102,7 +102,7 @@ export function Onboarding() {
             <span className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               Provider
             </span>
-            <div className="grid grid-cols-2 gap-2" role="radiogroup">
+            <div className="grid grid-cols-3 gap-2" role="radiogroup">
               {PROVIDER_LIST.map((p) => {
                 const selected = p.kind === provider;
                 return (
