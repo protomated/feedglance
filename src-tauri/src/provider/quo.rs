@@ -362,6 +362,20 @@ fn describe_error(status: reqwest::StatusCode, body: &str) -> String {
     }
 }
 
+/// HTTP client for Quo.
+///
+/// `api.quo.com` accepts only TLS 1.3 (TLS 1.2 is refused with a protocol
+/// alert, verified with `openssl s_client`). reqwest's default native-tls
+/// backend uses Secure Transport on macOS, which tops out at TLS 1.2, so every
+/// request failed with "bad protocol version". rustls speaks TLS 1.3 on every
+/// platform.
+fn quo_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .use_rustls_tls()
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
 // --- Provider ---
 
 pub struct QuoProvider {
@@ -377,7 +391,7 @@ pub struct QuoProvider {
 impl QuoProvider {
     pub fn new(email: &str, token: &str, user_id: &str) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: quo_client(),
             token: token.to_string(),
             email: email.trim().to_string(),
             user_id: user_id.to_string(),
@@ -949,6 +963,17 @@ mod tests {
             QuoProvider::conversation_label(&conv, &contacts),
             "Jane Doe, +15550000000"
         );
+    }
+
+    /// Needs no key: a bogus one must be rejected by Quo (Auth), which proves
+    /// the TLS 1.3 handshake succeeded. It failed as Network before rustls.
+    #[tokio::test]
+    #[ignore]
+    async fn reaches_api_over_tls13_live() {
+        match QuoProvider::new("nobody@example.com", "not-a-real-key", "").validate().await {
+            Err(ProviderError::Auth(_)) => {}
+            other => panic!("expected an auth rejection, got {:?}", other.map(|_| ())),
+        }
     }
 
     /// `QUO_API_KEY=… QUO_EMAIL=… cargo test quo -- --ignored --nocapture`

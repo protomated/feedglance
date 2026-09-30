@@ -18,7 +18,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
+# rustls alongside the default native-tls: api.quo.com accepts only TLS 1.3,
+# which macOS's native TLS (Secure Transport) cannot negotiate. The Quo client
+# opts in with `use_rustls_tls()`; everything else keeps native TLS.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 tauri-plugin-notification = "2"
 chrono = { version = "0.4", features = ["serde"] }
