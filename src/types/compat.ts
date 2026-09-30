@@ -46,15 +46,34 @@ function isLegacyActivity(v: unknown): v is ActivityItem {
 }
 
 /**
+ * Format a bare US/Canada number (`+12405471471` → `(240) 547-1471`).
+ *
+ * The backend already formats new Quo events; this covers texts cached by
+ * earlier builds, which stored raw E.164. Mirrors `display_number` in quo.rs.
+ */
+function displayPhone(s: string): string {
+  const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(s);
+  return m ? `(${m[1]}) ${m[2]}-${m[3]}` : s;
+}
+
+/**
  * Convert a normalized event into the legacy activity shape the feed renders.
  */
 export function toActivityItem(event: NormalizedEvent): ActivityItem {
+  if (event.provider === "quo") {
+    event = {
+      ...event,
+      actor: event.actor && { ...event.actor, name: displayPhone(event.actor.name) },
+      subject: { ...event.subject, displayId: displayPhone(event.subject.displayId) },
+    };
+  }
   // YouTrack: `raw` is the original activity — return it untouched so existing
   // rendering (field diffs, comment text, article targets) is unchanged.
   if (event.provider === "youtrack" && isLegacyActivity(event.raw)) {
     return {
       ...event.raw,
       accountId: event.accountId,
+      provider: event.provider,
       mentionsMe: event.mentionsMe,
       url: event.url,
       // Carried for filtering. YouTrack rendering still reads `category.id`
@@ -125,6 +144,7 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
     activityType: event.provider,
     kind: event.kind,
     accountId: event.accountId,
+    provider: event.provider,
     mentionsMe: event.mentionsMe,
     url: event.url,
   };

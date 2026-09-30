@@ -1,4 +1,4 @@
-import type { EventKind } from "./event";
+import type { EventKind, ProviderKind } from "./event";
 
 export interface ActivityAuthor {
   id: string;
@@ -73,6 +73,8 @@ export interface ActivityItem {
   description?: string;
   /** Account ID this activity belongs to (injected by polling engine). */
   accountId?: string;
+  /** Which provider produced the event. */
+  provider?: ProviderKind;
   /**
    * True when the current user is @-mentioned or directly targeted.
    *
@@ -106,8 +108,14 @@ export type ActivityCategoryId =
 
 /** Activities grouped by project for the feed. */
 export interface NotificationGroup {
+  /** Unique across accounts: `{accountId}:{projectKey}`. */
+  groupKey: string;
   projectKey: string; // project shortName or fallback id
   projectName: string; // human-readable project name
+  /** Provider-native project ID (Quo: the line's `PN…` ID). */
+  projectId?: string;
+  accountId?: string;
+  provider?: ProviderKind;
   activities: ActivityItem[];
   latestTimestamp: number;
   hasUnread: boolean;

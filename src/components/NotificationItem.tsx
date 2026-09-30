@@ -12,7 +12,7 @@ import { useUiPrefsStore } from "../stores/uiPrefs";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 /** Format a timestamp as relative time (e.g. "2m ago", "3h ago"). */
-function relativeTime(timestamp: number): string {
+export function relativeTime(timestamp: number): string {
   const now = Date.now();
   const diff = now - timestamp;
   const seconds = Math.floor(diff / 1000);
@@ -25,6 +25,12 @@ function relativeTime(timestamp: number): string {
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}d ago`;
   return new Date(timestamp).toLocaleDateString();
+}
+
+/** Avatar letter; a phone number's leading "+" or "(" says nothing. */
+function authorInitial(name: string): string {
+  const ch = name.match(/[\p{L}\p{N}]/u)?.[0] ?? "?";
+  return /\p{N}/u.test(ch) ? "#" : ch.toUpperCase();
 }
 
 const VALUE_TRUNCATE = 40;
@@ -430,7 +436,7 @@ function extractCommentText(activity: ActivityItem): string | null {
  * Resolves through nested issue/article when the direct target is a
  * comment, attachment, or VCS change.
  */
-function targetLabel(
+export function targetLabel(
   activity: ActivityItem,
 ): { label: string; id: string; type?: string; title?: string } | null {
   const t = activity.target;
@@ -508,6 +514,16 @@ interface Props {
   isJustRead?: boolean;
   isPinned?: boolean;
   isFocused?: boolean;
+  /**
+   * Rendered inside a thread whose header already names the subject, so the
+   * row drops its own issue/conversation header.
+   */
+  inThread?: boolean;
+  /**
+   * Show the "Name texted" line on a text message. A thread turns it off when
+   * every message is from the same person — the header already says who.
+   */
+  showAuthor?: boolean;
   onMarkRead: (id: string) => void;
   onOpenInBrowser?: (
     targetId: string,
@@ -517,7 +533,7 @@ interface Props {
   ) => void;
 }
 
-export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, onMarkRead, onOpenInBrowser }: Props) {
+export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, inThread = false, showAuthor = true, onMarkRead, onOpenInBrowser }: Props) {
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
   const [commentExpanded, setCommentExpanded] = useState(false);
   const [commentOverflows, setCommentOverflows] = useState(false);
@@ -641,7 +657,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
         title={isRead ? "Click to mark unread" : "Click to mark read"}
         onClick={() => onMarkRead(activity.id)}
       >
-        {/* Avatar */}
+        {/* Avatar — dropped for a 1:1 thread's texts, where it's always the same person */}
+        {!(isMessage && !showAuthor) && (
         <div className="flex-shrink-0 mt-0.5">
           {avatarUrl ? (
             <img
@@ -651,15 +668,16 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
             />
           ) : (
             <div className="w-5 h-5 rounded-full bg-gray-300 dark:bg-gray-600 flex items-center justify-center text-[9px] font-medium text-gray-600 dark:text-gray-300">
-              {authorName.charAt(0).toUpperCase()}
+              {authorInitial(authorName)}
             </div>
           )}
         </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 min-w-0">
           {/* A 1:1 text's conversation is its sender; the header would repeat the name. */}
-          {resolved && !(isMessage && resolved.label === authorName) && (
+          {resolved && !inThread && !(isMessage && resolved.label === authorName) && (
             <p className="mb-0.5 flex items-baseline gap-1.5 min-w-0">
               <span
                 onClick={handleOpenTarget}
@@ -679,6 +697,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
               )}
             </p>
           )}
+          {!(isMessage && !showAuthor) && (
           <p className="text-gray-700 dark:text-gray-300 leading-snug">
             <span className="font-medium text-gray-900 dark:text-gray-100">
               {authorName}
@@ -690,11 +709,16 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
               </span>
             )}
           </p>
+          )}
           {commentText && (
             <div className="mt-0.5">
               <p
                 ref={commentRef}
-                className={`text-gray-500 dark:text-gray-400 leading-snug whitespace-pre-wrap ${
+                className={`${
+                  isMessage && !showAuthor
+                    ? "text-gray-800 dark:text-gray-200"
+                    : "text-gray-500 dark:text-gray-400"
+                } leading-snug whitespace-pre-wrap ${
                   commentExpanded ? "" : "line-clamp-2"
                 }`}
               >

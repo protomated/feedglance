@@ -480,8 +480,12 @@ export function groupActivities(
 
     if (!groupMap.has(groupKey)) {
       groupMap.set(groupKey, {
+        groupKey,
         projectKey,
         projectName,
+        projectId: project?.id,
+        accountId: activity.accountId,
+        provider: activity.provider,
         activities: [],
         latestTimestamp: 0,
         hasUnread: false,
@@ -501,6 +505,56 @@ export function groupActivities(
   return Array.from(groupMap.values()).sort(
     (a, b) => b.latestTimestamp - a.latestTimestamp
   );
+}
+
+/**
+ * Activities about one subject — a Quo conversation, a YouTrack issue, a Nifty
+ * task — within a project group.
+ */
+export interface ActivityThread {
+  key: string;
+  /** Newest first, as the feed orders them. */
+  activities: ActivityItem[];
+  latestTimestamp: number;
+  hasUnread: boolean;
+}
+
+/**
+ * The subject an activity belongs to: the readable issue ID where there is one,
+ * else the native item ID. Activities with neither stand alone.
+ */
+function subjectKey(activity: ActivityItem): string {
+  const t = activity.target;
+  // A conversation's readable label is a contact name or formatted number,
+  // which can change between polls; its native ID never does.
+  if (activity.kind === "message" && t?.id) {
+    return `${activity.accountId ?? ""}:${t.id}`;
+  }
+  const isChild = t?.targetType === "IssueComment" || t?.targetType === "ArticleComment";
+  const readable = isChild ? t?.issue?.idReadable : (t?.idReadable ?? t?.issue?.idReadable);
+  const native = isChild ? (t?.issue?.id ?? t?.id) : (t?.id ?? t?.issue?.id);
+  const subject = readable || native || `activity:${activity.id}`;
+  return `${activity.accountId ?? ""}:${subject}`;
+}
+
+/** Split a group's activities into per-subject threads, most recent first. */
+export function threadActivities(
+  activities: ActivityItem[],
+  readIds: Set<string>,
+): ActivityThread[] {
+  const threads = new Map<string, ActivityThread>();
+  for (const activity of activities) {
+    const key = subjectKey(activity);
+    let thread = threads.get(key);
+    if (!thread) {
+      thread = { key, activities: [], latestTimestamp: 0, hasUnread: false };
+      threads.set(key, thread);
+    }
+    thread.activities.push(activity);
+    thread.latestTimestamp = Math.max(thread.latestTimestamp, activity.timestamp);
+    if (!readIds.has(activity.id)) thread.hasUnread = true;
+  }
+  return Array.from(threads.values()).sort((a, b) => b.latestTimestamp - a.latestTimestamp);
 }
 
 /** Compute unread count from state. Use as a pure derived value. */

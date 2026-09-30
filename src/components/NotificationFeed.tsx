@@ -353,7 +353,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
         ) : (
           groups.map((group) => (
             <NotificationGroup
-              key={group.projectKey}
+              key={group.groupKey}
               group={group}
               readIds={readIds}
               justReadIds={justReadIds}

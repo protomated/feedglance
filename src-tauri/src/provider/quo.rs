@@ -301,6 +301,18 @@ fn phone_key(number: &str) -> String {
     number.chars().filter(|c| c.is_ascii_digit()).collect()
 }
 
+/// A number as people read it: `+12405471471` → `(240) 547-1471` for US and
+/// Canadian numbers. Anything else stays in E.164, which is at least unambiguous.
+fn display_number(number: &str) -> String {
+    let digits = phone_key(number);
+    if number.starts_with("+1") && digits.len() == 11 {
+        let d = &digits[1..];
+        format!("({}) {}-{}", &d[0..3], &d[3..6], &d[6..])
+    } else {
+        number.to_string()
+    }
+}
+
 /// Pack what a reply needs into a subject ID; see `ID_SEP`.
 fn encode_subject_id(conversation_id: &str, phone_number_id: &str, participants: &[String]) -> String {
     format!(
@@ -582,7 +594,7 @@ impl QuoProvider {
         }
         conv.participants
             .iter()
-            .map(|p| contacts.get(&phone_key(p)).cloned().unwrap_or_else(|| p.clone()))
+            .map(|p| contacts.get(&phone_key(p)).cloned().unwrap_or_else(|| display_number(p)))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -596,7 +608,7 @@ impl QuoProvider {
         let sender = contacts
             .get(&phone_key(&msg.from))
             .cloned()
-            .unwrap_or_else(|| msg.from.clone());
+            .unwrap_or_else(|| display_number(&msg.from));
 
         NormalizedEvent {
             id: format!("quo:{}", msg.id),
@@ -867,7 +879,7 @@ impl ActionSource for QuoProvider {
             .iter()
             .map(|m| ThreadMessage {
                 author: if m.is_incoming() {
-                    m.from.clone()
+                    display_number(&m.from)
                 } else if m.user_id.as_deref() == Some(self.user_id.as_str()) && !self.user_id.is_empty() {
                     "You".into()
                 } else {
@@ -912,6 +924,12 @@ mod tests {
     #[test]
     fn phone_keys_ignore_formatting() {
         assert_eq!(phone_key("+1 (555) 123-4567"), phone_key("+15551234567"));
+    }
+
+    #[test]
+    fn us_numbers_are_formatted_for_display() {
+        assert_eq!(display_number("+12405471471"), "(240) 547-1471");
+        assert_eq!(display_number("+442071838750"), "+442071838750");
     }
 
     #[test]
@@ -961,7 +979,7 @@ mod tests {
         let contacts = HashMap::from([("15551234567".to_string(), "Jane Doe".to_string())]);
         assert_eq!(
             QuoProvider::conversation_label(&conv, &contacts),
-            "Jane Doe, +15550000000"
+            "Jane Doe, (555) 000-0000"
         );
     }
 
