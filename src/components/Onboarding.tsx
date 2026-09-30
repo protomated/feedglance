@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useAuthStore } from "../stores/auth";
 import { PROVIDER_LIST, PROVIDERS } from "../services/providers";
 import type { ProviderKind, UserInfo } from "../types/youtrack";
+import { errorMessage } from "../utils/errors";
 
 export function Onboarding() {
   const connect = useAuthStore((s) => s.connect);
@@ -48,7 +49,7 @@ export function Onboarding() {
       const user = await connect(normalized.value, token.trim(), provider);
       setSuccessUser(user);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to connect");
+      setError(errorMessage(e, "Failed to connect"));
     }
   };
 

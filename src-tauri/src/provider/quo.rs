@@ -100,7 +100,10 @@ struct Page<T> {
 #[serde(rename_all = "camelCase")]
 struct QuoUser {
     id: String,
-    email: String,
+    // Required by the spec, but optional here: one odd user (a pending invite)
+    // must not make the whole list undecodable and block sign-in.
+    #[serde(default)]
+    email: Option<String>,
     #[serde(default)]
     first_name: Option<String>,
     #[serde(default)]
@@ -116,7 +119,7 @@ impl QuoUser {
             .collect::<Vec<_>>()
             .join(" ");
         if name.is_empty() {
-            self.email.clone()
+            self.email.clone().unwrap_or_default()
         } else {
             name
         }
@@ -334,13 +337,13 @@ fn decode_subject_id(id: &str) -> Result<(&str, &str, Vec<&str>), ProviderError>
 /// the API's own message.
 fn describe_error(status: reqwest::StatusCode, body: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-    let code = parsed.get("code").and_then(|c| c.as_str()).unwrap_or("");
-    let message = parsed
-        .get("message")
-        .and_then(|m| m.as_str())
-        .unwrap_or("")
-        .to_string();
-    match (status.as_u16(), code) {
+    // Quo nests details under `error` (`{"error":{"message":…}}`, verified on
+    // a live 401); accept a flat body too.
+    let err = parsed.get("error").filter(|e| e.is_object()).unwrap_or(&parsed);
+    let field = |k: &str| err.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let code = field("code");
+    let message = field("message");
+    match (status.as_u16(), code.as_str()) {
         (400, "0206400") => {
             "Quo can't text US numbers from this line yet: its A2P 10DLC carrier registration \
              isn't approved. Reply in the Quo app, or finish registration in Quo."
@@ -466,7 +469,11 @@ impl QuoProvider {
         let (users, _) = self.list_users().await?;
         users
             .into_iter()
-            .find(|u| u.email.eq_ignore_ascii_case(&self.email))
+            .find(|u| {
+                u.email
+                    .as_deref()
+                    .is_some_and(|e| e.trim().eq_ignore_ascii_case(&self.email))
+            })
             .ok_or_else(|| {
                 ProviderError::Other(format!(
                     "No Quo user with the email {} in this workspace",
@@ -916,6 +923,15 @@ mod tests {
             r#"{"code":"0206400","message":"A2P Registration Not Approved"}"#,
         );
         assert!(msg.contains("A2P 10DLC"));
+    }
+
+    #[test]
+    fn nested_error_message_is_used() {
+        let msg = describe_error(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":{"message":"Forbidden","key":"Forbidden"}}"#,
+        );
+        assert_eq!(msg, "Quo API 403: Forbidden");
     }
 
     #[test]

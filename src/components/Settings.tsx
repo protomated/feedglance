@@ -10,6 +10,7 @@ import type { ProviderKind } from "../types/youtrack";
 import { DEFAULT_SHORTCUT } from "../App";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { Account } from "../types/youtrack";
+import { errorMessage } from "../utils/errors";
 
 interface SettingsProps {
   onClose: () => void;
@@ -161,7 +162,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
       setNewToken("");
       setNewProvider("youtrack");
     } catch (e) {
-      setAddError(e instanceof Error ? e.message : "Failed to add account");
+      setAddError(errorMessage(e, "Failed to add account"));
     } finally {
       setAdding(false);
     }
@@ -532,7 +533,7 @@ function AccountCard({ account, status, onRemove, onUpdateToken, onTestConnectio
       setShowUpdateToken(false);
       setNewToken("");
     } catch (e) {
-      setTokenError(e instanceof Error ? e.message : "Invalid token");
+      setTokenError(errorMessage(e, "Invalid token"));
     } finally {
       setUpdating(false);
     }
