@@ -1,3 +1,5 @@
+allowBuilds:
+  esbuild: true
 # pnpm 10.x reads build-script approvals from here (the package.json "pnpm"
 # field is no longer honored in recent 10.x). esbuild needs its postinstall
 # to fetch the platform binary, so allow it.

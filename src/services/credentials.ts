@@ -1,5 +1,6 @@
+import { invoke } from "@tauri-apps/api/core";
 import { load } from "@tauri-apps/plugin-store";
-import type { Account, Credentials } from "../types/youtrack";
+import type { Account } from "../types/youtrack";
 
 const STORE_NAME = "credentials.json";
 
@@ -10,7 +11,20 @@ const KEY_ACCOUNTS = "accounts";
 const LEGACY_KEY_URL = "youtrack_url";
 const LEGACY_KEY_TOKEN = "youtrack_token";
 
+/**
+ * An account as persisted in `credentials.json`.
+ *
+ * The token normally lives in the OS credential store (see `secrets.rs`) and is
+ * absent here. It is present only for accounts saved by builds before the
+ * keychain move — migrated on their next save — or when the credential store
+ * is unavailable (Linux without a Secret Service), where it is the fallback.
+ */
+type StoredAccount = Omit<Account, "token"> & { token?: string };
+
 let storeInstance: Awaited<ReturnType<typeof load>> | null = null;
+
+/** Tokens known to be in the keychain, so unchanged ones aren't rewritten on every save. */
+const keychainTokens = new Map<string, string>();
 
 async function getStore() {
   if (!storeInstance) {
@@ -19,14 +33,86 @@ async function getStore() {
   return storeInstance;
 }
 
+async function readToken(stored: StoredAccount): Promise<string> {
+  if (stored.token) return stored.token;
+  try {
+    const token = await invoke<string | null>("secret_get", { accountId: stored.id });
+    if (token) {
+      keychainTokens.set(stored.id, token);
+      return token;
+    }
+  } catch (e) {
+    console.warn(`Could not read token for ${stored.id} from the keychain:`, e);
+  }
+  // No token anywhere: the account loads, fails validation, and the user is
+  // asked to update its token.
+  return "";
+}
+
 /**
- * Get all stored accounts, migrating from legacy single-account format if needed.
+ * Move each account's token into the keychain and return what to persist.
+ * An account whose token can't be written keeps it in the file instead.
+ */
+async function toStored(accounts: Account[]): Promise<StoredAccount[]> {
+  const stored: StoredAccount[] = [];
+  for (const account of accounts) {
+    const { token, ...rest } = account;
+    // A legacy account has no ID until the auth store derives one; there is
+    // nothing stable to key its keychain entry on yet.
+    if (!account.id || !token) {
+      stored.push(account.id ? rest : account);
+      continue;
+    }
+    if (keychainTokens.get(account.id) === token) {
+      stored.push(rest);
+      continue;
+    }
+    try {
+      await invoke("secret_set", { accountId: account.id, token });
+      keychainTokens.set(account.id, token);
+      stored.push(rest);
+    } catch (e) {
+      console.warn(`Keychain unavailable, keeping token for ${account.id} in credentials.json:`, e);
+      stored.push(account);
+    }
+  }
+  return stored;
+}
+
+async function deleteToken(accountId: string): Promise<void> {
+  keychainTokens.delete(accountId);
+  try {
+    await invoke("secret_delete", { accountId });
+  } catch (e) {
+    console.warn(`Could not delete keychain token for ${accountId}:`, e);
+  }
+}
+
+/** Persist the full accounts list, dropping keychain tokens of accounts no longer in it. */
+async function writeAccounts(accounts: Account[]): Promise<void> {
+  const store = await getStore();
+  const previous = (await store.get<StoredAccount[]>(KEY_ACCOUNTS)) ?? [];
+  await store.set(KEY_ACCOUNTS, await toStored(accounts));
+  await store.save();
+
+  // After the save, so a crash between the two leaves an orphaned keychain
+  // entry rather than an account without its token. Covers removal and the
+  // ID change the auth store makes when it re-tags an account's provider.
+  const kept = new Set(accounts.map((a) => a.id));
+  for (const old of previous) {
+    if (old.id && !kept.has(old.id)) await deleteToken(old.id);
+  }
+}
+
+/**
+ * Get all stored accounts with their tokens, migrating from legacy
+ * single-account format if needed.
  */
 export async function getAccounts(): Promise<Account[]> {
   const store = await getStore();
-  const accounts = await store.get<Account[]>(KEY_ACCOUNTS);
+  const accounts = await store.get<StoredAccount[]>(KEY_ACCOUNTS);
   if (accounts && accounts.length > 0) {
-    return accounts;
+    return Promise.all(accounts.map(async (a) => ({ ...a, token: await readToken(a) })));
   }
 
   // Attempt legacy migration
@@ -45,74 +131,30 @@ export async function getAccounts(): Promise<Account[]> {
 
 /** Save an account (upsert by id). */
 export async function saveAccount(account: Account): Promise<void> {
-  const store = await getStore();
-  const accounts = (await store.get<Account[]>(KEY_ACCOUNTS)) ?? [];
+  const accounts = await getAccounts();
   const idx = accounts.findIndex((a) => a.id === account.id);
   if (idx >= 0) {
     accounts[idx] = account;
   } else {
     accounts.push(account);
   }
-  await store.set(KEY_ACCOUNTS, accounts);
-  await store.save();
+  await writeAccounts(accounts);
 
   // Clean up legacy keys if they still exist
-  await cleanupLegacyKeys(store);
+  await cleanupLegacyKeys(await getStore());
 }
 
-/** Remove an account by id. */
+/** Remove an account by id, including its keychain token. */
 export async function removeAccount(accountId: string): Promise<void> {
-  const store = await getStore();
-  const accounts = (await store.get<Account[]>(KEY_ACCOUNTS)) ?? [];
-  const filtered = accounts.filter((a) => a.id !== accountId);
-  await store.set(KEY_ACCOUNTS, filtered);
-  await store.save();
+  const accounts = await getAccounts();
+  await writeAccounts(accounts.filter((a) => a.id !== accountId));
+  await deleteToken(accountId);
 }
 
 /** Save the full accounts array (used during migration/initialization). */
 export async function saveAllAccounts(accounts: Account[]): Promise<void> {
-  const store = await getStore();
-  await store.set(KEY_ACCOUNTS, accounts);
-  await store.save();
-  await cleanupLegacyKeys(store);
-}
-
-// --- Backward-compatible shims (used during transition) ---
-
-/** @deprecated Use getAccounts() instead. Returns first account's credentials. */
-export async function getCredentials(): Promise<Credentials | null> {
-  const accounts = await getAccounts();
-  if (accounts.length === 0) return null;
-  const first = accounts[0];
-  return { url: first.url, token: first.token };
-}
-
-/** @deprecated Use saveAccount() instead. */
-export async function saveCredentials(credentials: Credentials): Promise<void> {
-  // This is only called from legacy code paths; for now, update the first account's token
-  const store = await getStore();
-  const accounts = (await store.get<Account[]>(KEY_ACCOUNTS)) ?? [];
-  if (accounts.length > 0) {
-    accounts[0].url = credentials.url;
-    accounts[0].token = credentials.token;
-    await store.set(KEY_ACCOUNTS, accounts);
-    await store.save();
-  } else {
-    // Fallback to legacy keys
-    await store.set(LEGACY_KEY_URL, credentials.url);
-    await store.set(LEGACY_KEY_TOKEN, credentials.token);
-    await store.save();
-  }
-}
-
-/** @deprecated Use removeAccount() for individual accounts. */
-export async function clearCredentials(): Promise<void> {
-  const store = await getStore();
-  await store.delete(KEY_ACCOUNTS);
-  await store.delete(LEGACY_KEY_URL);
-  await store.delete(LEGACY_KEY_TOKEN);
-  await store.save();
-  storeInstance = null;
+  await writeAccounts(accounts);
+  await cleanupLegacyKeys(await getStore());
 }
 
 async function cleanupLegacyKeys(store: Awaited<ReturnType<typeof load>>) {

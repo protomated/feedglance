@@ -33,3 +33,6 @@ urlencoding = "2.1.3"
 # the tray can composite an unread dot onto the icon on Windows and Linux, where
 # `set_title` is a no-op. Default features off — only PNG decode is needed.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Account tokens in the OS credential store: Keychain (macOS), Credential
+# Manager (Windows), Secret Service (Linux, pure-Rust zbus — no libdbus needed).
+keyring = "4"

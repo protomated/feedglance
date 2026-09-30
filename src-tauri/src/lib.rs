@@ -2,6 +2,7 @@ mod activities;
 mod cache;
 mod polling;
 mod provider;
+mod secrets;
 mod tray;
 mod youtrack;
 
@@ -656,6 +657,9 @@ pub fn run() {
             assign_item,
             get_project_states,
             get_project_team,
+            secrets::secret_set,
+            secrets::secret_get,
+            secrets::secret_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,6 +1,6 @@
 # Feedglance
 
-Gitify for YouTrack — a lightweight Tauri v2 desktop app that brings YouTrack Cloud notifications to the system tray with quick actions.
+A lightweight Tauri v2 desktop app that brings YouTrack Cloud and Nifty notifications to the system tray with quick actions.
 
 ## Download
 
@@ -63,6 +63,12 @@ For `.deb` packages, install with:
 ```sh
 sudo dpkg -i feedglance_*.deb
 ```
+
+Account tokens are stored in your desktop's Secret Service keyring (GNOME Keyring, KWallet, or KeePassXC). On setups without one, such as a bare window manager, Feedglance still works but keeps tokens unencrypted in its settings file. Install and unlock `gnome-keyring` to protect them.
+
+## Security
+
+Account tokens live in the OS credential store: the Keychain on macOS, Credential Manager on Windows, and the Secret Service on Linux. Only non-secret account details (host, label, user info) are written to `credentials.json` in the app's data directory.
 
 ## Development
 
