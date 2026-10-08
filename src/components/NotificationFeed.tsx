@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNotificationStore, groupActivities, countUnread } from "../stores/notifications";
+import { useNotificationStore, groupActivities, subjectKey } from "../stores/notifications";
 import { useFilterStore } from "../stores/filters";
 import { useAuthStore } from "../stores/auth";
 import { NotificationGroup } from "./NotificationGroup";
@@ -70,6 +70,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   const readIdsMap = useNotificationStore((s) => s.readIds);
   const allReadIds = useNotificationStore((s) => s.allReadIds);
   const markRead = useNotificationStore((s) => s.markRead);
+  const markManyRead = useNotificationStore((s) => s.markManyRead);
   const markUnread = useNotificationStore((s) => s.markUnread);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
   const accounts = useAuthStore((s) => s.accounts);
@@ -119,7 +120,10 @@ export function NotificationFeed({ focusedActivityId }: Props) {
 
   // Clear when the window loses focus (user switched away — "session" is over).
   useEffect(() => {
-    const onBlur = () => clearAllSticky();
+    const onBlur = () => {
+      clearAllSticky();
+      setOpenThreads(new Set());
+    };
     window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("blur", onBlur);
@@ -127,6 +131,48 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       stickyTimers.current.clear();
     };
   }, []);
+
+  /** Keep just-read rows on screen for 5s so they don't vanish under the cursor. */
+  const addSticky = (ids: string[]) => {
+    setJustReadIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    for (const id of ids) {
+      clearStickyTimer(id);
+      const timer = setTimeout(() => {
+        setJustReadIds((prev) => {
+          if (!prev.has(id)) return prev;
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+        stickyTimers.current.delete(id);
+      }, 5000);
+      stickyTimers.current.set(id, timer);
+    }
+  };
+
+  /** Mark a whole thread read, keeping it on screen briefly like a single row. */
+  const handleMarkThreadRead = (ids: string[]) => {
+    if (ids.length === 0) return;
+    addSticky(ids);
+    void markManyRead(ids);
+  };
+
+  // Threads the user has opened. An open thread stays in the Unread view after
+  // opening marks it read, so it doesn't vanish while being read; it leaves
+  // once closed (or when the window loses focus).
+  const [openThreads, setOpenThreads] = useState<Set<string>>(new Set());
+  const toggleThread = (key: string) => {
+    setOpenThreads((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   /** Toggle an activity's read state. Unread → read (with 5s sticky). Read → unread (instant). */
   const handleToggleRead = (activityId: string) => {
@@ -143,23 +189,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       void markUnread(activityId);
       return;
     }
-    // Mark as read, add to sticky set, schedule 5s dismissal.
-    setJustReadIds((prev) => {
-      const next = new Set(prev);
-      next.add(activityId);
-      return next;
-    });
-    clearStickyTimer(activityId);
-    const timer = setTimeout(() => {
-      setJustReadIds((prev) => {
-        if (!prev.has(activityId)) return prev;
-        const next = new Set(prev);
-        next.delete(activityId);
-        return next;
-      });
-      stickyTimers.current.delete(activityId);
-    }, 5000);
-    stickyTimers.current.set(activityId, timer);
+    addSticky([activityId]);
     void markRead(activityId);
   };
 
@@ -218,22 +248,41 @@ export function NotificationFeed({ focusedActivityId }: Props) {
     });
   }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers]);
 
-  const unreadCount = countUnread(filteredActivities, readIds);
-  const readCount = filteredActivities.length - unreadCount;
+  // Counts are per thread, matching the one-row-per-issue feed and the tray.
+  const { unreadCount, readCount, liveSubjects, pinnedSubjects } = useMemo(() => {
+    const all = new Set<string>();
+    const live = new Set<string>();
+    const pinned = new Set<string>();
+    const unread = new Set<string>();
+    for (const a of filteredActivities) {
+      const key = subjectKey(a);
+      all.add(key);
+      if (!readIds.has(a.id)) unread.add(key);
+      if (!readIds.has(a.id) || justReadIds.has(a.id)) live.add(key);
+      if (pinnedIds.has(a.id)) pinned.add(key);
+    }
+    for (const key of openThreads) live.add(key);
+    return {
+      unreadCount: unread.size,
+      readCount: all.size - unread.size,
+      liveSubjects: live,
+      pinnedSubjects: pinned,
+    };
+  }, [filteredActivities, readIds, justReadIds, pinnedIds, openThreads]);
 
+  // Visibility is decided per thread, not per activity: a thread with anything
+  // new shows with its full history, so the row can say "+4" and open onto the
+  // whole conversation instead of just the unread tail.
   const visibleActivities = useMemo(() => {
-    let result: ActivityItem[];
-    if (viewMode === "all") {
-      result = filteredActivities;
-    } else {
-      // Unread mode: show unread + sticky-just-read from this session
-      result = filteredActivities.filter((a) => !readIds.has(a.id) || justReadIds.has(a.id));
+    let result = filteredActivities;
+    if (viewMode === "unread") {
+      result = result.filter((a) => liveSubjects.has(subjectKey(a)));
     }
     if (showPinnedOnly) {
-      result = result.filter((a) => pinnedIds.has(a.id));
+      result = result.filter((a) => pinnedSubjects.has(subjectKey(a)));
     }
     return result;
-  }, [filteredActivities, readIds, pinnedIds, viewMode, justReadIds, showPinnedOnly]);
+  }, [filteredActivities, liveSubjects, pinnedSubjects, viewMode, showPinnedOnly]);
 
   const pinnedCount = filteredActivities.filter((a) => pinnedIds.has(a.id)).length;
   const groups = groupActivities(visibleActivities, readIds);
@@ -343,7 +392,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       )}
 
       {/* Scrollable feed */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto overflow-x-hidden">
         {groups.length === 0 ? (
           <EmptyState
             loading={loading}
@@ -359,7 +408,10 @@ export function NotificationFeed({ focusedActivityId }: Props) {
               justReadIds={justReadIds}
               pinnedIds={pinnedIds}
               focusedActivityId={focusedActivityId}
+              openThreads={openThreads}
+              onToggleThread={toggleThread}
               onMarkRead={handleToggleRead}
+              onMarkThreadRead={handleMarkThreadRead}
               onOpenInBrowser={handleOpenInBrowser}
             />
           ))

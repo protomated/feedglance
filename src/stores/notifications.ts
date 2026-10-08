@@ -206,6 +206,8 @@ interface NotificationState {
   setFocusState: (focus: "focused" | "minimized" | "idle") => Promise<void>;
   /** Mark a single activity as read (requires accountId). */
   markRead: (activityId: string, accountId?: string) => Promise<void>;
+  /** Mark several activities read at once, e.g. every comment in a thread. */
+  markManyRead: (activityIds: string[]) => Promise<void>;
   /** Mark a single activity as unread (reverses markRead). */
   markUnread: (activityId: string, accountId?: string) => Promise<void>;
   /** Mark all activities as read. */
@@ -355,6 +357,33 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
     readIdsMap.set(resolvedAccountId, newIds);
     set({ readIds: readIdsMap });
     persistReadIds(resolvedAccountId, newIds);
+  },
+
+  markManyRead: async (activityIds: string[]) => {
+    const byId = new Map(get().activities.map((a) => [a.id, a.accountId]));
+    const readIdsMap = new Map(get().readIds);
+    const touched = new Set<string>();
+    const unknown: string[] = [];
+    for (const activityId of activityIds) {
+      const acctId = byId.get(activityId);
+      if (!acctId) {
+        unknown.push(activityId);
+        continue;
+      }
+      const ids = readIdsMap.get(acctId) ?? new Set<string>();
+      if (ids.has(activityId)) continue;
+      await invoke("mark_activity_read", { activityId, accountId: acctId });
+      const next = touched.has(acctId) ? ids : new Set(ids);
+      next.add(activityId);
+      readIdsMap.set(acctId, next);
+      touched.add(acctId);
+    }
+    if (touched.size > 0) {
+      set({ readIds: readIdsMap });
+      for (const acctId of touched) persistReadIds(acctId, readIdsMap.get(acctId)!);
+    }
+    // No account to file these under; markRead's fallback handles that.
+    for (const activityId of unknown) await get().markRead(activityId);
   },
 
   markUnread: async (activityId: string, accountId?: string) => {
@@ -523,7 +552,7 @@ export interface ActivityThread {
  * The subject an activity belongs to: the readable issue ID where there is one,
  * else the native item ID. Activities with neither stand alone.
  */
-function subjectKey(activity: ActivityItem): string {
+export function subjectKey(activity: ActivityItem): string {
   const t = activity.target;
   // A conversation's readable label is a contact name or formatted number,
   // which can change between polls; its native ID never does.
@@ -555,12 +584,4 @@ export function threadActivities(
     if (!readIds.has(activity.id)) thread.hasUnread = true;
   }
   return Array.from(threads.values()).sort((a, b) => b.latestTimestamp - a.latestTimestamp);
-}
-
-/** Compute unread count from state. Use as a pure derived value. */
-export function countUnread(
-  activities: ActivityItem[],
-  readIds: Set<string>
-): number {
-  return activities.filter((a) => !readIds.has(a.id)).length;
 }

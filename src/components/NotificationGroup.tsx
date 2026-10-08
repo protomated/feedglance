@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { NotificationGroup as GroupType } from "../types/activity";
 import { threadActivities } from "../stores/notifications";
-import { NotificationItem } from "./NotificationItem";
 import { NotificationThread } from "./NotificationThread";
 
 /**
@@ -28,7 +27,10 @@ interface Props {
   justReadIds: Set<string>;
   pinnedIds: Set<string>;
   focusedActivityId?: string | null;
+  openThreads: Set<string>;
+  onToggleThread: (key: string) => void;
   onMarkRead: (id: string) => void;
+  onMarkThreadRead: (ids: string[]) => void;
   onOpenInBrowser: (
     targetId: string,
     targetType?: string,
@@ -43,7 +45,10 @@ export function NotificationGroup({
   justReadIds,
   pinnedIds,
   focusedActivityId,
+  openThreads,
+  onToggleThread,
   onMarkRead,
+  onMarkThreadRead,
   onOpenInBrowser,
 }: Props) {
   const [expanded, setExpanded] = useState(group.hasUnread);
@@ -53,7 +58,7 @@ export function NotificationGroup({
   );
   const link = groupLink(group);
   const allTexts = group.activities.every((a) => a.kind === "message");
-  const count = group.activities.length;
+  const newThreads = threads.filter((t) => t.hasUnread).length;
 
   return (
     <div className="border-b border-gray-100 dark:border-gray-800">
@@ -74,12 +79,11 @@ export function NotificationGroup({
           {group.projectName}
         </span>
 
-        {/* Activity count */}
+        {/* Thread count: one row per issue or conversation below */}
         <span className="flex-shrink-0 text-gray-400 dark:text-gray-500">
-          {allTexts
-            ? `${count} text${count === 1 ? "" : "s"}`
-            : `${count} activit${count === 1 ? "y" : "ies"}`}
-          {threads.length > 1 && ` · ${threads.length} ${allTexts ? "conversations" : "items"}`}
+          {threads.length} {allTexts ? "conversation" : "item"}
+          {threads.length === 1 ? "" : "s"}
+          {newThreads > 0 && newThreads < threads.length && ` · ${newThreads} new`}
         </span>
 
         {/* Spacer */}
@@ -116,31 +120,21 @@ export function NotificationGroup({
       {/* Expanded activities */}
       {expanded && (
         <div className="border-t border-gray-50 dark:border-gray-800/50 divide-y divide-gray-50 dark:divide-gray-800/50">
-          {threads.map((thread) =>
-            thread.activities.length === 1 ? (
-              <NotificationItem
-                key={thread.key}
-                activity={thread.activities[0]}
-                isRead={readIds.has(thread.activities[0].id)}
-                isJustRead={justReadIds.has(thread.activities[0].id)}
-                isPinned={pinnedIds.has(thread.activities[0].id)}
-                isFocused={focusedActivityId === thread.activities[0].id}
-                onMarkRead={onMarkRead}
-                onOpenInBrowser={onOpenInBrowser}
-              />
-            ) : (
-              <NotificationThread
-                key={thread.key}
-                thread={thread}
-                readIds={readIds}
-                justReadIds={justReadIds}
-                pinnedIds={pinnedIds}
-                focusedActivityId={focusedActivityId}
-                onMarkRead={onMarkRead}
-                onOpenInBrowser={onOpenInBrowser}
-              />
-            ),
-          )}
+          {threads.map((thread) => (
+            <NotificationThread
+              key={thread.key}
+              thread={thread}
+              readIds={readIds}
+              justReadIds={justReadIds}
+              pinnedIds={pinnedIds}
+              focusedActivityId={focusedActivityId}
+              expanded={openThreads.has(thread.key)}
+              onToggleExpanded={onToggleThread}
+              onMarkRead={onMarkRead}
+              onMarkThreadRead={onMarkThreadRead}
+              onOpenInBrowser={onOpenInBrowser}
+            />
+          ))}
         </div>
       )}
     </div>

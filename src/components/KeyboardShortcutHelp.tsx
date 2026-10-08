@@ -7,11 +7,11 @@ interface Props {
 const SHORTCUTS: Array<{ keys: string; description: string }> = [
   { keys: "j / \u2193", description: "Move focus down" },
   { keys: "k / \u2191", description: "Move focus up" },
-  { keys: "o", description: "Open in browser" },
+  { keys: "o", description: "Open in browser (marks thread read)" },
   { keys: "r", description: "Reply to issue" },
   { keys: "s", description: "Change status" },
   { keys: "a", description: "Assign issue" },
-  { keys: "e", description: "Mark as read" },
+  { keys: "e", description: "Mark thread as read" },
   { keys: "Shift + e", description: "Mark all as read" },
   { keys: "p", description: "Pin / unpin" },
   { keys: "Escape", description: "Clear focus / close" },

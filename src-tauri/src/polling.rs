@@ -359,6 +359,8 @@ impl PollingManager {
     /// per-account mutes, so a user filtering to one project sees a badge for
     /// that project rather than the whole workspace.
     pub fn filtered_unread_count(&self) -> u32 {
+        // The feed shows one row per issue or conversation, so the badge counts
+        // those rather than the comments inside them.
         self.accounts
             .values()
             .map(|a| {
@@ -379,7 +381,15 @@ impl PollingManager {
                         }
                         self.filters.allows(e, &a.current_user_id)
                     })
-                    .count() as u32
+                    .map(|e| {
+                        if e.subject.id.is_empty() {
+                            e.id.as_str()
+                        } else {
+                            e.subject.id.as_str()
+                        }
+                    })
+                    .collect::<HashSet<_>>()
+                    .len() as u32
             })
             .sum()
     }
@@ -850,9 +860,11 @@ mod tests {
             "t".into(),
             String::new(),
         );
+        let mut e2 = ev("e2", "a1", Some("p2"), EventKind::Comment);
+        e2.subject.id = "t2".into();
         acct.events = vec![
             ev("e1", "a1", Some("p1"), EventKind::Comment),
-            ev("e2", "a1", Some("p2"), EventKind::Comment),
+            e2,
             ev("e3", "a1", Some("p1"), EventKind::Comment),
         ];
         acct.read_ids.insert("e3".into());
@@ -869,6 +881,29 @@ mod tests {
             .muted_issues
             .insert("P-1".into());
         assert_eq!(mgr.filtered_unread_count(), 0, "muted issues do not count");
+    }
+
+    /// The badge counts threads, as the feed shows them: three unread comments
+    /// on one issue are one row, so one on the badge.
+    #[test]
+    fn filtered_unread_count_counts_threads_not_comments() {
+        let mut mgr = PollingManager::new();
+        let mut acct = AccountPollingState::with_provider(
+            ProviderKind::Nifty,
+            String::new(),
+            "t".into(),
+            String::new(),
+        );
+        let mut other = ev("e4", "a1", Some("p1"), EventKind::Comment);
+        other.subject.id = "t2".into();
+        acct.events = vec![
+            ev("e1", "a1", Some("p1"), EventKind::Comment),
+            ev("e2", "a1", Some("p1"), EventKind::Comment),
+            ev("e3", "a1", Some("p1"), EventKind::Comment),
+            other,
+        ];
+        mgr.accounts.insert("a1".into(), acct);
+        assert_eq!(mgr.filtered_unread_count(), 2);
     }
 
     /// Server-side read state wins over the local set where a provider has it.

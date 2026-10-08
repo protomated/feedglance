@@ -6,7 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import { load } from "@tauri-apps/plugin-store";
 import { useAuthStore } from "./stores/auth";
-import { useNotificationStore, countUnread } from "./stores/notifications";
+import { useNotificationStore, groupActivities, threadActivities } from "./stores/notifications";
 import { useFilterStore } from "./stores/filters";
 import { useKeyboardNavigation } from "./hooks/useKeyboardNavigation";
 import { Onboarding } from "./components/Onboarding";
@@ -92,7 +92,7 @@ function App() {
   const activities = useNotificationStore((s) => s.activities);
   const readIdsMap = useNotificationStore((s) => s.readIds);
   const allReadIds = useNotificationStore((s) => s.allReadIds);
-  const markRead = useNotificationStore((s) => s.markRead);
+  const markManyRead = useNotificationStore((s) => s.markManyRead);
   const markAllRead = useNotificationStore((s) => s.markAllRead);
   const initFilters = useFilterStore((s) => s.initialize);
   const selectedProjects = useFilterStore((s) => s.selectedProjects);
@@ -101,6 +101,7 @@ function App() {
   const searchQuery = useFilterStore((s) => s.searchQuery);
   const selectedAccounts = useFilterStore((s) => s.selectedAccounts);
   const assignedToMeOnly = useFilterStore((s) => s.assignedToMeOnly);
+  const viewMode = useFilterStore((s) => s.viewMode);
   const currentUserId = useAuthStore((s) => s.user?.id);
 
   const [globalShortcut, setGlobalShortcut] = useState(DEFAULT_SHORTCUT);
@@ -146,8 +147,35 @@ function App() {
     });
   }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers]);
 
-  // Unread count derived from filtered activities so badge matches the feed
-  const unreadCount = countUnread(flatActivities, readIds);
+  // The feed shows one row per issue or conversation, in this order. Keyboard
+  // navigation moves between those rows, addressed by their newest activity.
+  const threads = useMemo(
+    () =>
+      groupActivities(flatActivities, readIds).flatMap((g) =>
+        threadActivities(g.activities, readIds),
+      ),
+    [flatActivities, readIds],
+  );
+  const navThreads = useMemo(
+    () => (viewMode === "unread" ? threads.filter((t) => t.hasUnread) : threads),
+    [threads, viewMode],
+  );
+  const navLeads = useMemo(() => navThreads.map((t) => t.activities[0]), [navThreads]);
+
+  // Unread threads, so the header badge matches the feed and the tray.
+  const unreadCount = threads.filter((t) => t.hasUnread).length;
+
+  /** Mark read every unread activity in the thread a row's newest activity leads. */
+  const markThreadRead = useCallback(
+    (activityId: string) => {
+      const thread = threads.find((t) => t.activities[0].id === activityId);
+      const ids = thread
+        ? thread.activities.filter((a) => !readIds.has(a.id)).map((a) => a.id)
+        : [activityId];
+      if (ids.length > 0) markManyRead(ids);
+    },
+    [threads, readIds, markManyRead],
+  );
 
   // Mirror the feed's filters into the backend, which owns the tray badge.
   //
@@ -171,6 +199,7 @@ function App() {
     (activityId: string) => {
       const activity = activities.find((a) => a.id === activityId);
       if (!activity) return;
+      markThreadRead(activityId);
 
       // Prefer the provider-computed deep link. The reconstruction below keys
       // off `idReadable`, which Nifty tasks do not have, so without this the
@@ -197,7 +226,7 @@ function App() {
       const path = t.targetType === "Article" ? "articles" : "issue";
       openUrl(`${baseUrl}/${path}/${idReadable}`);
     },
-    [accounts, credentials, activities],
+    [accounts, credentials, activities, markThreadRead],
   );
 
   // Keyboard actions that emit custom events to trigger UI in NotificationItem
@@ -228,12 +257,8 @@ function App() {
     [],
   );
 
-  const handleKbMarkRead = useCallback(
-    (activityId: string) => {
-      markRead(activityId);
-    },
-    [markRead],
-  );
+  // `e` reads the whole thread the focused row stands for.
+  const handleKbMarkRead = markThreadRead;
 
   const handleKbMarkAllRead = useCallback(() => {
     markAllRead();
@@ -274,10 +299,10 @@ function App() {
 
   const { focusedActivityId, setFlatActivities } = useKeyboardNavigation(kbActions);
 
-  // Keep the hook's flat list in sync with the filtered activities
+  // Keep the hook's list in sync with the rows the feed shows
   useEffect(() => {
-    setFlatActivities(flatActivities);
-  }, [flatActivities, setFlatActivities]);
+    setFlatActivities(navLeads);
+  }, [navLeads, setFlatActivities]);
 
   // Initialize auth
   useEffect(() => {

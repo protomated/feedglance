@@ -4,7 +4,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { useAuthStore } from "../stores/auth";
-import { useUiPrefsStore } from "../stores/uiPrefs";
+import { useUiPrefsStore, type DateStyle } from "../stores/uiPrefs";
+import { formatTime } from "./NotificationItem";
 import { PROVIDER_LIST, PROVIDERS, providerOf } from "../services/providers";
 import type { ProviderKind } from "../types/youtrack";
 import { DEFAULT_SHORTCUT } from "../App";
@@ -52,6 +53,16 @@ function formatShortcut(shortcut: string): string {
 }
 
 /** "A", "A and B", "A, B and C". */
+const DATE_STYLE_OPTIONS: { value: DateStyle; label: string; hint: string }[] = [
+  { value: "relative", label: "Relative", hint: "How long ago" },
+  { value: "absolute", label: "Date and time", hint: "When it happened" },
+  { value: "mixed", label: "Relative, then date", hint: "Relative for the last week" },
+];
+
+/** Example timestamps for the previews: two hours ago and twelve days ago. */
+const SAMPLE_RECENT = () => Date.now() - 2 * 60 * 60 * 1000;
+const SAMPLE_OLDER = () => Date.now() - 12 * 24 * 60 * 60 * 1000;
+
 function joinNames(names: string[]): string {
   if (names.length <= 1) return names.join("");
   return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
@@ -69,6 +80,8 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
 
   const [autostart, setAutostart] = useState(false);
   const quoSendInApp = useUiPrefsStore((s) => s.quoSendInApp);
+  const dateStyle = useUiPrefsStore((s) => s.dateStyle);
+  const setDateStyle = useUiPrefsStore((s) => s.setDateStyle);
   const setQuoSendInApp = useUiPrefsStore((s) => s.setQuoSendInApp);
   const loadUiPrefs = useUiPrefsStore((s) => s.load);
   useEffect(() => {
@@ -348,6 +361,47 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
             />
           </button>
         </label>
+
+        {/* Dates: each option previews a recent and an older timestamp */}
+        <div className="px-3 py-1.5">
+          <span className="text-sm text-gray-700 dark:text-gray-300">Dates</span>
+          <div role="radiogroup" aria-label="Dates" className="mt-1.5 space-y-1">
+            {DATE_STYLE_OPTIONS.map((opt) => {
+              const selected = dateStyle === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => setDateStyle(opt.value)}
+                  className={`w-full flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 text-left transition-colors ${
+                    selected
+                      ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30"
+                      : "border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800"
+                  }`}
+                >
+                  <span
+                    className={`flex-shrink-0 h-3 w-3 rounded-full border ${
+                      selected
+                        ? "border-blue-600 bg-blue-600 ring-2 ring-inset ring-white dark:ring-gray-900"
+                        : "border-gray-300 dark:border-gray-600"
+                    }`}
+                  />
+                  <span className="flex-1 min-w-0">
+                    <span className="block text-xs text-gray-700 dark:text-gray-300">{opt.label}</span>
+                    <span className="block text-[10px] text-gray-400">{opt.hint}</span>
+                  </span>
+                  <span className="flex-shrink-0 text-[10px] font-mono text-gray-500 dark:text-gray-400 text-right leading-tight">
+                    {formatTime(SAMPLE_RECENT(), opt.value)}
+                    <br />
+                    {formatTime(SAMPLE_OLDER(), opt.value)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         {/* Quo replies: API send (paid) vs. open in Quo (free) */}
         {accounts.some((a) => a.provider === "quo") && (

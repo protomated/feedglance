@@ -8,7 +8,7 @@ import { StatusDropdown } from "./StatusDropdown";
 import { AssignDropdown } from "./AssignDropdown";
 import { fetchItemDetails } from "../services/actions";
 import { providerOf } from "../services/providers";
-import { useUiPrefsStore } from "../stores/uiPrefs";
+import { useUiPrefsStore, type DateStyle } from "../stores/uiPrefs";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 /** Format a timestamp as relative time (e.g. "2m ago", "3h ago"). */
@@ -27,8 +27,48 @@ export function relativeTime(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
+/** Clock time, e.g. "8:37 AM" (follows the system's 12/24-hour setting). */
+function clockTime(d: Date): string {
+  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+/** Full date and time, e.g. "Sep 26, 4:10 PM", with the year when it isn't this one. */
+export function absoluteTime(timestamp: number): string {
+  const d = new Date(timestamp);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return clockTime(d);
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const date = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+  return sameYear ? `${date}, ${clockTime(d)}` : date;
+}
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A timestamp in the user's chosen date style (Settings → Dates). */
+export function formatTime(timestamp: number, style: DateStyle): string {
+  switch (style) {
+    case "absolute":
+      return absoluteTime(timestamp);
+    case "mixed":
+      if (Date.now() - timestamp < WEEK_MS) return relativeTime(timestamp);
+      return new Date(timestamp).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        ...(new Date(timestamp).getFullYear() === new Date().getFullYear()
+          ? {}
+          : { year: "numeric" }),
+      });
+    default:
+      return relativeTime(timestamp);
+  }
+}
+
 /** Avatar letter; a phone number's leading "+" or "(" says nothing. */
-function authorInitial(name: string): string {
+export function authorInitial(name: string): string {
   const ch = name.match(/[\p{L}\p{N}]/u)?.[0] ?? "?";
   return /\p{N}/u.test(ch) ? "#" : ch.toUpperCase();
 }
@@ -204,7 +244,7 @@ function oldNew(oldName: string | null, newName: string | null, clearedLabel: st
 }
 
 /** Describe what happened in this activity as a React node plus flags. */
-function describeActivity(activity: ActivityItem, currentUserLogin: string | null, currentUserId: string | null): DescriptionResult {
+export function describeActivity(activity: ActivityItem, currentUserLogin: string | null, currentUserId: string | null): DescriptionResult {
   const categoryId = activity.category?.id;
   const fieldName = activity.field?.name ?? "";
 
@@ -418,7 +458,7 @@ function renderCommentBody(text: string): ReactNode {
 }
 
 /** Extract comment text from the added value. */
-function extractCommentText(activity: ActivityItem): string | null {
+export function extractCommentText(activity: ActivityItem): string | null {
   if (activity.category?.id !== "CommentsCategory") return null;
   const added = activity.added;
   if (Array.isArray(added) && added.length > 0) {
@@ -505,7 +545,7 @@ function resolveProjectId(activity: ActivityItem): string | null {
   return t.project?.id ?? t.issue?.project?.id ?? t.article?.project?.id ?? null;
 }
 
-type ActiveAction = "reply" | "status" | "assign" | null;
+export type ActiveAction = "reply" | "status" | "assign" | null;
 
 
 interface Props {
@@ -524,6 +564,16 @@ interface Props {
    * every message is from the same person — the header already says who.
    */
   showAuthor?: boolean;
+  /**
+   * Action to open on mount. A collapsed thread forwards a keyboard action
+   * here when it expands, since this row wasn't mounted to hear it.
+   */
+  initialAction?: ActiveAction;
+  /**
+   * Unread when its thread was opened. Opening marks the thread read, but these
+   * keep the unread look while it stays open so the new ones still stand out.
+   */
+  isNew?: boolean;
   onMarkRead: (id: string) => void;
   onOpenInBrowser?: (
     targetId: string,
@@ -533,7 +583,7 @@ interface Props {
   ) => void;
 }
 
-export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, inThread = false, showAuthor = true, onMarkRead, onOpenInBrowser }: Props) {
+export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, inThread = false, showAuthor = true, initialAction = null, isNew = false, onMarkRead, onOpenInBrowser }: Props) {
   const [activeAction, setActiveAction] = useState<ActiveAction>(null);
   const [commentExpanded, setCommentExpanded] = useState(false);
   const [commentOverflows, setCommentOverflows] = useState(false);
@@ -578,7 +628,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
     setCommentOverflows(el.scrollHeight > el.clientHeight + 1);
   }, [commentText, commentExpanded]);
 
-  const time = relativeTime(activity.timestamp);
+  const dateStyle = useUiPrefsStore((s) => s.dateStyle);
+  const time = formatTime(activity.timestamp, dateStyle);
   const resolved = targetLabel(activity);
 
   const issueId = resolveIssueId(activity);
@@ -634,6 +685,12 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
 
   toggleActionRef.current = (action) => toggleAction(action);
 
+  useEffect(() => {
+    if (initialAction) toggleActionRef.current(initialAction);
+    // Mount only: the thread clears its pending action once handed over.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   /** Hand the reply off to the provider's own app (free, unlike an API send). */
   const replyInProviderApp = () => {
     if (!activity.url) return;
@@ -646,9 +703,9 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
       <div
         onMouseEnter={prefetchDetails}
         className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors cursor-pointer ${
-          isAssignmentToMe && !isRead ? "border-l-2 border-amber-400 dark:border-amber-500 pl-[10px]" : ""
+          isAssignmentToMe && (!isRead || isNew) ? "border-l-2 border-amber-400 dark:border-amber-500 pl-[10px]" : ""
         } ${
-          isRead
+          isRead && !isNew
             ? "opacity-60 hover:opacity-80 hover:bg-gray-50 dark:hover:bg-gray-800/50"
             : isAssignmentToMe
               ? "bg-amber-50/60 dark:bg-amber-900/10"
@@ -718,7 +775,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
                   isMessage && !showAuthor
                     ? "text-gray-800 dark:text-gray-200"
                     : "text-gray-500 dark:text-gray-400"
-                } leading-snug whitespace-pre-wrap ${
+                } leading-snug whitespace-pre-wrap [overflow-wrap:anywhere] ${
                   commentExpanded ? "" : "line-clamp-2"
                 }`}
               >
@@ -745,7 +802,10 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
             which made the whole feed jump on every hover. The timestamp stays
             in layout (just invisible) so nothing reflows. */}
         <div className="relative flex-shrink-0 flex items-start">
-          <span className="text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:invisible flex items-center gap-1">
+          <span
+            className="text-gray-400 dark:text-gray-500 whitespace-nowrap group-hover:invisible flex items-center gap-1"
+            title={new Date(activity.timestamp).toLocaleString()}
+          >
             {isPinned && (
               <svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" className="text-amber-500">
                 <path d="M4.456.734a1.75 1.75 0 0 1 2.826.504l.613 1.327a3.08 3.08 0 0 0 2.084 1.707l2.454.584c1.332.317 1.8 1.972.832 2.94L11.06 10l3.72 3.72a.75.75 0 1 1-1.06 1.06L10 11.06l-2.204 2.205c-.968.968-2.623.5-2.94-.832l-.584-2.454a3.08 3.08 0 0 0-1.707-2.084l-1.327-.613a1.75 1.75 0 0 1-.504-2.826Z" />
