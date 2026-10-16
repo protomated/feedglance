@@ -186,6 +186,9 @@ async function syncReadIdsToBackend(accountId: string, readIds: Set<string>) {
   }
 }
 
+/** Threads whose earlier own comments were already fetched this session. */
+const backfilledThreads = new Set<string>();
+
 interface NotificationState {
   activities: ActivityItem[];
   /** Per-account read IDs. */
@@ -214,6 +217,12 @@ interface NotificationState {
   markAllRead: () => Promise<void>;
   /** Refresh activities from backend cache. */
   refresh: () => Promise<void>;
+  /**
+   * Fetch your own earlier comments into the thread `activityId` is in. Runs
+   * once per thread per session; polling only ever looks forward, so replies
+   * from before the thread's newest activity arrived come in this way.
+   */
+  backfillOwnComments: (threadKey: string, activityId: string, accountId?: string) => void;
   /** Pin an activity for later review. */
   pinActivity: (activityId: string) => void;
   /** Unpin an activity. */
@@ -438,13 +447,29 @@ export const useNotificationStore = create<NotificationState>((set, get) => ({
       // Persist the normalized form — it is what restore_activities expects.
       persistActivities(events);
       // Components still render the legacy shape; convert at this boundary.
-      set({
-        activities: toActivityItems(events),
-        error: null,
-      });
+      const activities = toActivityItems(events);
+      set({ activities, error: null });
+      // What you wrote yourself is never news to you. Recording it as read
+      // keeps every unread count, chip and dot right without special cases.
+      const read = get().allReadIds();
+      const mine = activities.filter((a) => a.isMine && !read.has(a.id)).map((a) => a.id);
+      if (mine.length > 0) await get().markManyRead(mine);
     } catch (e) {
       set({ error: e instanceof Error ? e.message : String(e) });
     }
+  },
+
+  backfillOwnComments: (threadKey, activityId, accountId) => {
+    if (!accountId || backfilledThreads.has(threadKey)) return;
+    backfilledThreads.add(threadKey);
+    invoke<number>("backfill_own_comments", { accountId, activityId })
+      .then((added) => {
+        if (added > 0) void get().refresh();
+      })
+      .catch(() => {
+        // Context only; let a later open try again.
+        backfilledThreads.delete(threadKey);
+      });
   },
 
   pinActivity: (activityId: string) => {
@@ -564,6 +589,20 @@ export function subjectKey(activity: ActivityItem): string {
   const native = isChild ? (t?.issue?.id ?? t?.id) : (t?.id ?? t?.issue?.id);
   const subject = readable || native || `activity:${activity.id}`;
   return `${activity.accountId ?? ""}:${subject}`;
+}
+
+/**
+ * Drop your own comments on subjects that have nothing else in the list.
+ *
+ * Your replies are there to give a thread its full context, so they join
+ * threads that are already in the feed but never start a row of their own,
+ * such as a comment you left on some other issue in the web app.
+ */
+export function dropLoneOwnActivities(activities: ActivityItem[]): ActivityItem[] {
+  if (!activities.some((a) => a.isMine)) return activities;
+  const others = new Set<string>();
+  for (const a of activities) if (!a.isMine) others.add(subjectKey(a));
+  return activities.filter((a) => !a.isMine || others.has(subjectKey(a)));
 }
 
 /** Split a group's activities into per-subject threads, most recent first. */

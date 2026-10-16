@@ -213,9 +213,36 @@ impl YouTrackClient {
             url.push_str(&format!("&start={}", start_timestamp));
         }
 
+        self.fetch_activity_list(&url).await
+    }
+
+    /// Comments one user left on one issue, however old.
+    ///
+    /// Used to backfill a thread with the user's own side of it: the poll only
+    /// ever looks forward from its watermark.
+    pub async fn get_issue_comments_by(
+        &self,
+        issue_id_readable: &str,
+        author_id: &str,
+    ) -> Result<Vec<ActivityItem>, Box<dyn std::error::Error + Send + Sync>> {
+        let query = format!("issue id: {}", issue_id_readable);
+        let url = format!(
+            "{}/api/activities?fields={}&categories=CommentsCategory&issueQuery={}&author={}&$top=100",
+            self.base_url,
+            ACTIVITY_FIELDS,
+            urlencoding::encode(&query),
+            urlencoding::encode(author_id),
+        );
+        self.fetch_activity_list(&url).await
+    }
+
+    async fn fetch_activity_list(
+        &self,
+        url: &str,
+    ) -> Result<Vec<ActivityItem>, Box<dyn std::error::Error + Send + Sync>> {
         let resp = self
             .http
-            .get(&url)
+            .get(url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(ACCEPT, "application/json")
             .send()

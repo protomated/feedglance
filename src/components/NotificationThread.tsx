@@ -5,6 +5,13 @@ import type { ActivityThread } from "../stores/notifications";
 import { useAuthStore } from "../stores/auth";
 import { useUiPrefsStore } from "../stores/uiPrefs";
 import { useFilterStore } from "../stores/filters";
+import { useNotificationStore } from "../stores/notifications";
+import {
+  arrivedReplies,
+  draftKey as toDraftKey,
+  useRepliesStore,
+  type PendingReply,
+} from "../stores/replies";
 import { providerOf } from "../services/providers";
 import { toPlainSnippet } from "../utils/plainText";
 import { InlineReply } from "./InlineReply";
@@ -87,6 +94,28 @@ export function NotificationThread({
   const label = targetLabel(latest);
   const issueId = resolveIssueId(latest);
   const actionItemId = resolveActionItemId(latest) ?? issueId;
+
+  // Replies sent from here show in the thread until the provider's own copy
+  // arrives with a poll; an unsent one is kept as this item's draft.
+  const loadDrafts = useRepliesStore((s) => s.load);
+  useEffect(() => {
+    loadDrafts();
+  }, [loadDrafts]);
+  const hasDraft = useRepliesStore(
+    (s) => !!actionItemId && !!s.drafts[toDraftKey(latest.accountId, actionItemId)],
+  );
+  const allPending = useRepliesStore((s) => s.pending);
+  const settleReplies = useRepliesStore((s) => s.settle);
+  const pending = allPending.filter((p) => p.threadKey === thread.key);
+  const arrived = arrivedReplies(
+    pending,
+    thread.activities.filter((a) => a.isMine).map((a) => a.timestamp),
+  );
+  useEffect(() => {
+    if (arrived.length > 0) settleReplies(arrived);
+  }, [arrived.join(), settleReplies]);
+  const shownPending = pending.filter((p) => !arrived.includes(p.id));
+  const newestPending = shownPending[shownPending.length - 1];
   const unread = thread.activities.filter((a) => !readIds.has(a.id));
   // Only the Unread view drops read threads, so only there do they fade out.
   const leaving =
@@ -110,6 +139,15 @@ export function NotificationThread({
     markThreadRead();
     onToggleExpanded(thread.key);
   };
+
+  // Opening a thread brings in your own earlier replies to it, which polling
+  // can't: it only looks forward from the newest activity it has seen.
+  const backfillOwnComments = useNotificationStore((s) => s.backfillOwnComments);
+  useEffect(() => {
+    if (!expanded) return;
+    const template = thread.activities.find((a) => !a.isMine);
+    if (template) backfillOwnComments(thread.key, template.id, template.accountId);
+  }, [expanded, thread.key, backfillOwnComments]);
 
   // Keyboard actions target the newest activity. While the thread is open its
   // row hears them itself; while closed, open it and hand the action over.
@@ -161,13 +199,21 @@ export function NotificationThread({
   const toggleRead = (e: React.MouseEvent) => {
     e.stopPropagation();
     // Unread → the whole thread is read. Read → only the newest comes back,
-    // so the thread returns as "1 new" rather than its whole history.
+    // so the thread returns as "1 new" rather than its whole history. Your
+    // own replies are always read, so it's the newest of everyone else's.
     if (unread.length > 0) markThreadRead();
-    else onMarkRead(latest.id);
+    else onMarkRead((thread.activities.find((a) => !a.isMine) ?? latest).id);
+  };
+
+  /** Show a reply you just sent: open the thread it went to. */
+  const showSentReply = () => {
+    if (!expanded) onToggleExpanded(thread.key);
   };
 
   // --- Collapsed preview ---------------------------------------------------
-  const authorName = latest.author?.name || latest.author?.login || "Unknown";
+  const authorName = latest.isMine
+    ? "You"
+    : latest.author?.name || latest.author?.login || "Unknown";
   const firstName = authorName.split(/\s+/)[0];
   const commentText = extractCommentText(latest);
   const preview = commentText
@@ -237,6 +283,18 @@ export function NotificationThread({
             </span>
           )}
           <span className="flex-1" />
+          {hasDraft && !replying && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setReplying(true);
+              }}
+              title="You have an unsent reply here. Click to continue it."
+              className="flex-shrink-0 rounded-full border border-amber-300 dark:border-amber-700 px-1.5 text-[10px] font-semibold leading-4 text-amber-700 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30 group-hover:invisible"
+            >
+              Draft
+            </button>
+          )}
           {/* Same floating toolbar as rows, so hovering never reflows the line. */}
           <span
             className="flex-shrink-0 text-gray-400 dark:text-gray-500 whitespace-nowrap flex items-center gap-1 group-hover:invisible"
@@ -270,12 +328,28 @@ export function NotificationThread({
                   : "text-gray-500 dark:text-gray-400"
               }`}
             >
-              {showAuthor && (
-                <span className="font-medium text-gray-900 dark:text-gray-100">
-                  {commentText ? `${firstName}: ` : `${authorName} `}
-                </span>
+              {newestPending ? (
+                <>
+                  <span className="font-medium text-gray-900 dark:text-gray-100">You: </span>
+                  {newestPending.text}
+                  <span
+                    className={`ml-1 text-[10px] ${
+                      newestPending.status === "failed" ? "text-red-500" : "text-gray-400 dark:text-gray-500"
+                    }`}
+                  >
+                    · {STATUS_LABEL[newestPending.status]}
+                  </span>
+                </>
+              ) : (
+                <>
+                  {showAuthor && (
+                    <span className="font-medium text-gray-900 dark:text-gray-100">
+                      {commentText ? `${firstName}: ` : `${authorName} `}
+                    </span>
+                  )}
+                  {preview}
+                </>
               )}
-              {preview}
             </p>
             {chip && (
               <span
@@ -368,6 +442,16 @@ export function NotificationThread({
               </div>
             );
           })}
+          {shownPending.map((reply) => (
+            <PendingReplyRow
+              key={reply.id}
+              reply={reply}
+              onEdit={() => {
+                useRepliesStore.getState().edit(reply.id);
+                setReplying(true);
+              }}
+            />
+          ))}
         </div>
       )}
 
@@ -382,9 +466,64 @@ export function NotificationThread({
           isRead={unread.length === 0}
           mentions={capabilities.mentions}
           isConversation={isConversation}
+          threadKey={thread.key}
           onClose={() => setReplying(false)}
+          onSent={showSentReply}
         />
       )}
+    </div>
+  );
+}
+
+const STATUS_LABEL: Record<PendingReply["status"], string> = {
+  sending: "Sending…",
+  sent: "Sent",
+  failed: "Not sent",
+};
+
+/**
+ * A reply you sent from Feedglance, shown at the end of its thread until the
+ * provider's copy of it arrives. A failed one offers a retry, or a way back
+ * into the reply box with the text intact.
+ */
+function PendingReplyRow({ reply, onEdit }: { reply: PendingReply; onEdit: () => void }) {
+  const retry = useRepliesStore((s) => s.retry);
+  const failed = reply.status === "failed";
+  return (
+    <div
+      className={`mx-2 my-1.5 rounded-md border px-2 py-1.5 text-xs ${
+        failed
+          ? "border-red-200 bg-red-50 dark:border-red-900/60 dark:bg-red-950/30"
+          : "border-blue-200 bg-blue-50 dark:border-blue-900/60 dark:bg-blue-950/30"
+      }`}
+    >
+      <div className="flex items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400">
+        <span className="font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">You</span>
+        <span>· just now ·</span>
+        <span className={failed ? "font-medium text-red-600 dark:text-red-400" : ""} title={reply.error}>
+          {STATUS_LABEL[reply.status]}
+        </span>
+        {failed && (
+          <>
+            <span className="flex-1" />
+            <button
+              onClick={() => retry(reply.id)}
+              className="font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+            >
+              Retry
+            </button>
+            <button
+              onClick={onEdit}
+              className="font-medium text-gray-600 hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100"
+            >
+              Edit
+            </button>
+          </>
+        )}
+      </div>
+      <p className="mt-0.5 leading-snug whitespace-pre-wrap [overflow-wrap:anywhere] text-gray-800 dark:text-gray-200">
+        {reply.text}
+      </p>
     </div>
   );
 }

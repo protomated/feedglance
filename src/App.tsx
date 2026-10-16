@@ -6,7 +6,12 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 import { load } from "@tauri-apps/plugin-store";
 import { useAuthStore } from "./stores/auth";
-import { useNotificationStore, groupActivities, threadActivities } from "./stores/notifications";
+import {
+  useNotificationStore,
+  dropLoneOwnActivities,
+  groupActivities,
+  threadActivities,
+} from "./stores/notifications";
 import { useFilterStore } from "./stores/filters";
 import { useKeyboardNavigation } from "./hooks/useKeyboardNavigation";
 import { Onboarding } from "./components/Onboarding";
@@ -123,8 +128,8 @@ function App() {
   // Must mirror NotificationFeed's filters exactly so the header/tray badge
   // matches what the feed actually shows.
   const flatActivities = useMemo(() => {
-    return activities.filter((a) => {
-      if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe) return false;
+    return dropLoneOwnActivities(activities.filter((a) => {
+      if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe && !a.isMine) return false;
       if (selectedAccounts.size > 0 && a.accountId) {
         if (!selectedAccounts.has(a.accountId)) return false;
       }
@@ -144,7 +149,7 @@ function App() {
         if (!isAssigneeChangeTo(a, login, id)) return false;
       }
       return true;
-    });
+    }));
   }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers]);
 
   // The feed shows one row per issue or conversation, in this order. Keyboard

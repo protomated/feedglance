@@ -116,6 +116,11 @@ pub struct NormalizedEvent {
     /// True when the current user is @-mentioned or directly targeted.
     #[serde(default)]
     pub mentions_me: bool,
+    /// The current user wrote this: their own comment or text. It stays in its
+    /// thread so the conversation reads both ways, but it is always read and
+    /// never notifies.
+    #[serde(default)]
+    pub is_mine: bool,
     /// Server-side read state where the provider has one (Nifty `seen_by`).
     /// `None` means the provider has no such concept and read state is local.
     #[serde(default)]
@@ -197,6 +202,20 @@ pub trait NotificationSource: Send + Sync {
     /// This is what keeps large-workspace fan-out from exhausting a rate limit
     /// that is shared across every user of the same workspace.
     async fn fetch(&self, cursor: &Cursor, budget: u32) -> Result<FetchResult, ProviderError>;
+
+    /// The current user's own comments on the item `template` belongs to,
+    /// however old, marked `is_mine`.
+    ///
+    /// The poll only looks forward from its watermark, so replies written
+    /// before a thread entered the feed would never show in it. `template` is
+    /// an event already in that thread; providers reuse its subject so what
+    /// they return joins the same thread.
+    async fn own_comments(
+        &self,
+        _template: &NormalizedEvent,
+    ) -> Result<Vec<NormalizedEvent>, ProviderError> {
+        Ok(Vec::new())
+    }
 
     /// Minimum seconds between polls. Providers with heavier fan-out ask for more.
     fn min_interval_secs(&self) -> u64 {

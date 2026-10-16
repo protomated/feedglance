@@ -85,6 +85,11 @@ export interface ActivityItem {
    */
   mentionsMe?: boolean;
   /**
+   * The current user wrote this: their own comment or text. It is shown in its
+   * thread for context, but counts as read and never starts a row on its own.
+   */
+  isMine?: boolean;
+  /**
    * Deep link into the provider's web UI, as computed by the provider.
    *
    * Carried through from the normalized event because the URL shape is

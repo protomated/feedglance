@@ -629,6 +629,7 @@ impl QuoProvider {
             },
             text: Some(msg.body()),
             mentions_me: false,
+            is_mine: false,
             seen_remotely: None,
             url: Some(format!(
                 "{}/inbox/{}/c/{}?at={}",
@@ -651,6 +652,43 @@ impl QuoProvider {
 impl NotificationSource for QuoProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Quo
+    }
+
+    async fn own_comments(
+        &self,
+        template: &NormalizedEvent,
+    ) -> Result<Vec<NormalizedEvent>, ProviderError> {
+        let (conv_id, phone_number_id, participants) = decode_subject_id(&template.subject.id)?;
+        let user_id = if self.user_id.is_empty() {
+            self.user_id().await?
+        } else {
+            self.user_id.clone()
+        };
+        if user_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let msgs = self
+            .messages(phone_number_id, &participants, None, PAGE_SIZE)
+            .await?;
+        let conv = QuoConversation {
+            id: conv_id.to_string(),
+            phone_number_id: phone_number_id.to_string(),
+            participants: participants.iter().map(|p| p.to_string()).collect(),
+            name: None,
+            last_activity_id: None,
+            deleted_at: None,
+        };
+        Ok(msgs
+            .iter()
+            .filter(|m| !m.is_incoming() && m.user_id.as_deref() == Some(user_id.as_str()))
+            .map(|m| {
+                let mut e = Self::to_event(&conv, m, &HashMap::new(), None);
+                // The thread's subject, so these land in it.
+                e.subject = template.subject.clone();
+                e.is_mine = true;
+                e
+            })
+            .collect())
     }
 
     async fn validate(&self) -> Result<String, ProviderError> {
@@ -764,17 +802,27 @@ impl NotificationSource for QuoProvider {
             };
             calls += 1;
 
-            for m in msgs.iter().filter(|m| m.is_incoming()) {
+            for m in &msgs {
+                // Texts you sent join the conversation so it reads both ways;
+                // teammates' sends on a shared line stay out.
+                let mine = !m.is_incoming()
+                    && !user_id.is_empty()
+                    && m.user_id.as_deref() == Some(user_id.as_str());
+                if !m.is_incoming() && !mine {
+                    continue;
+                }
                 let ts = m.timestamp_ms();
                 if ts > max_ts {
                     max_ts = ts;
                 }
-                events.push(Self::to_event(
+                let mut event = Self::to_event(
                     conv,
                     m,
                     &state.contacts,
                     state.lines.get(&conv.phone_number_id),
-                ));
+                );
+                event.is_mine = mine;
+                events.push(event);
             }
             if !activity.is_empty() {
                 state.last_activity.insert(conv.id.clone(), activity);

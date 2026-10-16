@@ -202,8 +202,9 @@ impl FeedFilters {
     /// Mirrors `flatActivities` in App.tsx. The two must agree, or the badge
     /// disagrees with the feed the user sees.
     fn allows(&self, event: &NormalizedEvent, current_user_id: &str) -> bool {
-        // Own actions are hidden unless they mention you.
-        if !current_user_id.is_empty() && !event.mentions_me {
+        // Own actions are hidden unless they mention you. Your own comments
+        // (`is_mine`) do show, in their threads, but are never unread.
+        if !current_user_id.is_empty() && !event.mentions_me && !event.is_mine {
             if let Some(actor) = &event.actor {
                 if actor.id == current_user_id {
                     return false;
@@ -343,6 +344,7 @@ impl PollingManager {
             .map(|a| {
                 a.events
                     .iter()
+                    .filter(|e| !e.is_mine)
                     .filter(|e| match e.seen_remotely {
                         Some(seen) => !seen,
                         None => !a.read_ids.contains(&e.id),
@@ -367,6 +369,9 @@ impl PollingManager {
                 a.events
                     .iter()
                     .filter(|e| {
+                        if e.is_mine {
+                            return false;
+                        }
                         let unread = match e.seen_remotely {
                             Some(seen) => !seen,
                             None => !a.read_ids.contains(&e.id),
@@ -595,15 +600,17 @@ async fn apply_events(
 
         let is_muted = !event.subject.display_id.is_empty()
             && target.muted.contains(&event.subject.display_id);
+        // Your own comment is there for the thread's context, not to alert you.
+        let silent = is_muted || event.is_mine;
 
-        if !is_muted && is_for_me(&event, &acct.current_user_id) {
+        if !silent && is_for_me(&event, &acct.current_user_id) {
             assigned_to_me.push((
                 event.subject.display_id.clone(),
                 event.subject.title.clone(),
             ));
         }
 
-        if !is_muted && event.kind == EventKind::Message {
+        if !silent && event.kind == EventKind::Message {
             let sender = event
                 .actor
                 .as_ref()
@@ -615,7 +622,7 @@ async fn apply_events(
         acct.seen_ids.insert(event.id.clone());
         acct.events.insert(0, event);
         new_count += 1;
-        if !is_muted {
+        if !silent {
             notifiable_count += 1;
         }
     }
@@ -633,6 +640,62 @@ async fn apply_events(
         assigned_to_me,
         texts,
     })
+}
+
+/// Pull the user's own earlier comments into the thread `activity_id` is in.
+///
+/// The poll only looks forward from its watermark, so a reply written before
+/// the thread's newest activity arrived never reaches the feed by polling. The
+/// frontend calls this once when a thread is opened. Returns how many comments
+/// were added; they are `is_mine`, so they never notify or count as unread.
+pub async fn backfill_own_comments(
+    state: &SharedPollingState,
+    account_id: &str,
+    activity_id: &str,
+) -> Result<usize, String> {
+    let (source, template) = {
+        let mgr = state.read().await;
+        let Some(acct) = mgr.accounts.get(account_id) else {
+            return Ok(0);
+        };
+        if !acct.is_pollable() {
+            return Ok(0);
+        }
+        // YouTrack activities reach the feed under their native ID, without
+        // the `youtrack:` prefix the event carries here.
+        let Some(template) = acct.events.iter().find(|e| {
+            e.id == activity_id
+                || (e.provider == ProviderKind::YouTrack
+                    && e.id.strip_prefix("youtrack:") == Some(activity_id))
+        }) else {
+            return Ok(0);
+        };
+        (acct.source(), template.clone())
+    };
+
+    let found = source
+        .own_comments(&template)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut mgr = state.write().await;
+    let Some(acct) = mgr.accounts.get_mut(account_id) else {
+        return Ok(0);
+    };
+    let mut added = 0;
+    for mut event in found {
+        if acct.seen_ids.contains(&event.id) {
+            continue;
+        }
+        event.account_id = account_id.to_string();
+        acct.seen_ids.insert(event.id.clone());
+        acct.events.push(event);
+        added += 1;
+    }
+    if added > 0 {
+        acct.events.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    }
+    Ok(added)
 }
 
 /// True when an event directly targets the current user — an assignment to them,
@@ -711,6 +774,7 @@ mod tests {
             },
             text: Some("hello world".into()),
             mentions_me: false,
+            is_mine: false,
             seen_remotely: None,
             url: None,
             account_id: account.into(),
@@ -813,6 +877,40 @@ mod tests {
         // With no known user id there is nobody to exclude.
         e.mentions_me = false;
         assert!(f.allows(&e, ""));
+    }
+
+    /// Your own comments show in their threads (`is_mine`), so the filter lets
+    /// them through. They never count as unread; see the test below.
+    #[test]
+    fn own_comments_marked_mine_pass_the_filter() {
+        let f = FeedFilters::default();
+        let mut e = ev("e1", "a1", None, EventKind::Comment);
+        e.actor = Some(crate::provider::EventActor {
+            id: "me".into(),
+            name: "Me".into(),
+            avatar_url: String::new(),
+        });
+        e.is_mine = true;
+        assert!(f.allows(&e, "me"));
+    }
+
+    /// A comment you wrote is never unread, whatever the read set says, so
+    /// replying can't light up the badge for your own thread.
+    #[test]
+    fn own_comments_never_count_as_unread() {
+        let mut mgr = PollingManager::new();
+        let mut acct = AccountPollingState::with_provider(
+            ProviderKind::Nifty,
+            String::new(),
+            "t".into(),
+            String::new(),
+        );
+        let mut mine = ev("e1", "a1", None, EventKind::Comment);
+        mine.is_mine = true;
+        acct.events = vec![mine];
+        mgr.accounts.insert("a1".into(), acct);
+        assert_eq!(mgr.filtered_unread_count(), 0);
+        assert_eq!(mgr.total_unread_count(), 0);
     }
 
     /// `assignedToMeOnly` mirrors `isAssigneeChangeTo`, which requires an
@@ -978,6 +1076,7 @@ mod tests {
             },
             text: None,
             mentions_me,
+            is_mine: false,
             seen_remotely: None,
             url: None,
             account_id: String::new(),

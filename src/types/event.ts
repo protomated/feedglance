@@ -49,6 +49,8 @@ export interface NormalizedEvent {
   text?: string;
   /** Current user is @-mentioned or directly targeted. */
   mentionsMe: boolean;
+  /** The current user wrote this. Shown in its thread, always read. */
+  isMine?: boolean;
   /**
    * Server-side read state, where a provider has one.
    *

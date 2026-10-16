@@ -146,6 +146,17 @@ async fn set_focus_state(
     Ok(())
 }
 
+/// Fetch the user's own earlier comments into the thread an activity is in.
+/// Returns how many were added.
+#[tauri::command]
+async fn backfill_own_comments(
+    state: tauri::State<'_, SharedPollingState>,
+    account_id: String,
+    activity_id: String,
+) -> Result<usize, String> {
+    polling::backfill_own_comments(&state, &account_id, &activity_id).await
+}
+
 #[tauri::command]
 async fn get_activities(
     state: tauri::State<'_, SharedPollingState>,
@@ -642,6 +653,7 @@ pub fn run() {
             remove_account,
             set_focus_state,
             get_activities,
+            backfill_own_comments,
             mark_activity_read,
             mark_activity_unread,
             mark_all_read,

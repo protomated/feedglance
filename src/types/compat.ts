@@ -75,6 +75,7 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
       accountId: event.accountId,
       provider: event.provider,
       mentionsMe: event.mentionsMe,
+      isMine: event.isMine,
       url: event.url,
       // Carried for filtering. YouTrack rendering still reads `category.id`
       // off the raw payload, but the filter needs the finer-grained kind —
@@ -146,6 +147,7 @@ export function toActivityItem(event: NormalizedEvent): ActivityItem {
     accountId: event.accountId,
     provider: event.provider,
     mentionsMe: event.mentionsMe,
+    isMine: event.isMine,
     url: event.url,
   };
 }

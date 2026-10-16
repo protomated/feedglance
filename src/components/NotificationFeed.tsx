@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNotificationStore, groupActivities, subjectKey } from "../stores/notifications";
+import {
+  useNotificationStore,
+  dropLoneOwnActivities,
+  groupActivities,
+  subjectKey,
+} from "../stores/notifications";
 import { useFilterStore } from "../stores/filters";
 import { useAuthStore } from "../stores/auth";
 import { NotificationGroup } from "./NotificationGroup";
@@ -207,11 +212,12 @@ export function NotificationFeed({ focusedActivityId }: Props) {
 
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
-    return activities.filter((a) => {
+    return dropLoneOwnActivities(activities.filter((a) => {
       // Filter out current user's own activities — unless they were @-mentioned
       // in them. Providers show self-mentions in their own notification lists,
       // so hiding them here makes the feed disagree with the source of truth.
-      if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe) return false;
+      // Your own comments (`isMine`) stay, to give their threads context.
+      if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe && !a.isMine) return false;
 
       // Account filter
       if (selectedAccounts.size > 0 && a.accountId) {
@@ -245,7 +251,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       }
 
       return true;
-    });
+    }));
   }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers]);
 
   // Counts are per thread, matching the one-row-per-issue feed and the tray.

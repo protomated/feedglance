@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ActivityItem } from "../types/activity";
 import { useFilterStore } from "../stores/filters";
-import { useNotificationStore } from "../stores/notifications";
+import { useNotificationStore, subjectKey } from "../stores/notifications";
 import { useAuthStore } from "../stores/auth";
 import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
@@ -609,6 +609,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
   }, [activity.id]);
 
   const accounts = useAuthStore((s) => s.accounts);
+  const mine = !!activity.isMine;
   const authorName = activity.author?.name || activity.author?.login || "Unknown";
   const avatarUrl = activity.author?.avatarUrl;
   // Resolve the current-user identity for the account this activity belongs to
@@ -705,14 +706,17 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
         className={`group relative flex gap-2.5 px-3 py-2 text-xs transition-colors cursor-pointer ${
           isAssignmentToMe && (!isRead || isNew) ? "border-l-2 border-amber-400 dark:border-amber-500 pl-[10px]" : ""
         } ${
-          isRead && !isNew
+          // Your own replies fade like any read row; the "You" label marks them.
+          mine
+            ? "opacity-60"
+            : isRead && !isNew
             ? "opacity-60 hover:opacity-80 hover:bg-gray-50 dark:hover:bg-gray-800/50"
             : isAssignmentToMe
               ? "bg-amber-50/60 dark:bg-amber-900/10"
               : "bg-blue-50/50 dark:bg-blue-900/10"
         }${isFocused ? " ring-2 ring-inset ring-blue-400 dark:ring-blue-500" : ""}`}
-        title={isRead ? "Click to mark unread" : "Click to mark read"}
-        onClick={() => onMarkRead(activity.id)}
+        title={mine ? undefined : isRead ? "Click to mark unread" : "Click to mark read"}
+        onClick={mine ? undefined : () => onMarkRead(activity.id)}
       >
         {/* Avatar — dropped for a 1:1 thread's texts, where it's always the same person */}
         {!(isMessage && !showAuthor) && (
@@ -758,7 +762,12 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
           <p className="text-gray-700 dark:text-gray-300 leading-snug">
             <span className="font-medium text-gray-900 dark:text-gray-100">
               {authorName}
-            </span>{" "}
+            </span>
+            {mine && (
+              <span className="ml-1 rounded border border-gray-200 dark:border-gray-700 bg-gray-100 dark:bg-gray-800 px-1 text-[9px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 align-[1px]">
+                You
+              </span>
+            )}{" "}
             {description}
             {isAssignmentToMe && (
               <span className="ml-1.5 inline-flex items-center rounded px-1 py-[1px] text-[9px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200 align-middle">
@@ -954,6 +963,7 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
           isRead={isRead}
           mentions={capabilities.mentions}
           isConversation={isMessage}
+          threadKey={subjectKey(activity)}
           onClose={() => setActiveAction(null)}
         />
       )}

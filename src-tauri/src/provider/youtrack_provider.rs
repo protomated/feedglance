@@ -133,6 +133,7 @@ impl YouTrackProvider {
             subject,
             text: target.and_then(|t| t.text.clone()),
             mentions_me: false,
+            is_mine: false,
             // YouTrack has no server-side read state — it stays local.
             seen_remotely: None,
             url,
@@ -146,6 +147,37 @@ impl YouTrackProvider {
 impl NotificationSource for YouTrackProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::YouTrack
+    }
+
+    async fn own_comments(
+        &self,
+        template: &NormalizedEvent,
+    ) -> Result<Vec<NormalizedEvent>, ProviderError> {
+        if self.current_user_id.is_empty() || template.subject.display_id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let activities = self
+            .client
+            .get_issue_comments_by(&template.subject.display_id, &self.current_user_id)
+            .await
+            .map_err(|e| {
+                let msg = e.to_string();
+                if let Some(secs) = msg.strip_prefix("RATE_LIMITED:") {
+                    ProviderError::RateLimited(secs.parse().unwrap_or(60))
+                } else {
+                    ProviderError::Network(msg)
+                }
+            })?;
+        Ok(activities
+            .iter()
+            .filter(|a| a.author.as_ref().is_some_and(|au| au.id == self.current_user_id))
+            .map(|a| self.to_event(a))
+            .filter(|e| e.kind == EventKind::Comment)
+            .map(|mut e| {
+                e.is_mine = true;
+                e
+            })
+            .collect())
     }
 
     async fn validate(&self) -> Result<String, ProviderError> {
@@ -191,18 +223,21 @@ impl NotificationSource for YouTrackProvider {
         let mut events = Vec::new();
 
         for a in &activities {
-            // Suppress the user's own actions.
-            if !self.current_user_id.is_empty() {
-                if let Some(ref author) = a.author {
-                    if author.id == self.current_user_id {
-                        continue;
-                    }
+            let mine = !self.current_user_id.is_empty()
+                && a.author.as_ref().is_some_and(|au| au.id == self.current_user_id);
+            let mut event = self.to_event(a);
+            // Your own comments stay so a thread shows your side of it; the
+            // rest of what you did (status changes, assignments) is suppressed.
+            if mine {
+                if event.kind != EventKind::Comment {
+                    continue;
                 }
+                event.is_mine = true;
             }
             if a.timestamp > max_ts {
                 max_ts = a.timestamp;
             }
-            events.push(self.to_event(a));
+            events.push(event);
         }
 
         events.sort_by(|x, y| y.timestamp.cmp(&x.timestamp));

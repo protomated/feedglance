@@ -476,13 +476,16 @@ impl NiftyProvider {
         Ok((out, calls))
     }
 
-    /// Should this message be hidden because the user caused it themselves?
+    /// Is this the user's own action, to keep out of notifications?
     ///
-    /// Own actions are suppressed to match YouTrack behaviour — you don't want
-    /// your own comments notifying you. An explicit @-tag overrides that: a
-    /// direct mention is the highest-signal event the feed carries, and Nifty's
-    /// UI shows it regardless of who wrote it. Suppressing a self-authored
-    /// mention is what made the app disagree with Nifty's own notification list.
+    /// Own actions never notify, matching YouTrack — you don't want your own
+    /// comments alerting you. Own comments still reach the feed (as `is_mine`)
+    /// so a thread shows your side of it; anything else you did is dropped.
+    ///
+    /// An explicit @-tag overrides all of that: a direct mention is the
+    /// highest-signal event the feed carries, and Nifty's UI shows it
+    /// regardless of who wrote it. Treating a self-authored mention as an own
+    /// action is what made the app disagree with Nifty's notification list.
     fn is_suppressed_own_action(&self, msg: &NiftyMessage) -> bool {
         if self.current_user_id.is_empty() {
             return false;
@@ -699,6 +702,7 @@ impl NiftyProvider {
                 .as_deref()
                 .map(|t| Self::resolve_mentions(t, directory)),
             mentions_me,
+            is_mine: false,
             seen_remotely,
             url,
             account_id: String::new(),
@@ -733,6 +737,40 @@ struct NiftyUser {
 impl NotificationSource for NiftyProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Nifty
+    }
+
+    async fn own_comments(
+        &self,
+        template: &NormalizedEvent,
+    ) -> Result<Vec<NormalizedEvent>, ProviderError> {
+        if self.current_user_id.is_empty() || template.subject.id.is_empty() {
+            return Ok(Vec::new());
+        }
+        let msgs = match template.subject.id.strip_prefix(DISCUSSION_ID_PREFIX) {
+            Some(chat_id) => self.fetch_discussion(chat_id).await?,
+            None => self.fetch_messages(&template.subject.id).await?,
+        };
+        let mine: Vec<&NiftyMessage> = msgs
+            .iter()
+            .filter(|m| !m.is_deleted && self.is_suppressed_own_action(m))
+            .collect();
+        if mine.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Names for any @-mentions in your comments; bare IDs if it fails.
+        let directory = self.member_directory().await.unwrap_or_default();
+        Ok(mine
+            .into_iter()
+            .map(|m| self.to_event(m, None, None, &directory))
+            .filter(|e| e.kind == EventKind::Comment)
+            .map(|mut e| {
+                // The thread's subject, so these land in it.
+                e.subject = template.subject.clone();
+                e.url = template.url.clone();
+                e.is_mine = true;
+                e
+            })
+            .collect())
     }
 
     fn min_interval_secs(&self) -> u64 {
@@ -917,13 +955,17 @@ impl NotificationSource for NiftyProvider {
                 if ts <= cutoff {
                     continue;
                 }
+                let mut event = self.to_event(m, task, project, &directory);
                 if self.is_suppressed_own_action(m) {
-                    continue;
+                    if event.kind != EventKind::Comment {
+                        continue;
+                    }
+                    event.is_mine = true;
                 }
                 if ts > max_ts {
                     max_ts = ts;
                 }
-                events.push(self.to_event(m, task, project, &directory));
+                events.push(event);
             }
         }
 
@@ -966,13 +1008,17 @@ impl NotificationSource for NiftyProvider {
                 if ts <= cutoff {
                     continue;
                 }
+                let mut event = self.to_event(m, None, project, &directory);
                 if self.is_suppressed_own_action(m) {
-                    continue;
+                    if event.kind != EventKind::Comment {
+                        continue;
+                    }
+                    event.is_mine = true;
                 }
                 if ts > max_ts {
                     max_ts = ts;
                 }
-                events.push(self.to_event(m, None, project, &directory));
+                events.push(event);
             }
         }
 

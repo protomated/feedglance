@@ -3,14 +3,13 @@ import { useAuthStore } from "../stores/auth";
 import {
   fetchAssignees,
   fetchItemDetails,
-  postComment,
   type AssigneeOption,
   type ItemDetails,
 } from "../services/actions";
 import { useNotificationStore } from "../stores/notifications";
+import { draftKey as toDraftKey, useRepliesStore } from "../stores/replies";
 import { useUiPrefsStore } from "../stores/uiPrefs";
 import { toPlainSnippet } from "../utils/plainText";
-import { showToast } from "./Toast";
 import type { ThreadMessage } from "../services/actions";
 
 /**
@@ -38,7 +37,12 @@ interface Props {
    * a description, and word the UI as sending a text.
    */
   isConversation?: boolean;
+  /** The feed thread this reply belongs to; the sent reply shows there. */
+  threadKey: string;
+  /** Closes the box. Whatever was typed stays as the thread's draft. */
   onClose: () => void;
+  /** The reply was handed off for sending (the box closes right after). */
+  onSent?: () => void;
 }
 
 export function InlineReply({
@@ -51,16 +55,23 @@ export function InlineReply({
   isRead,
   mentions = true,
   isConversation = false,
+  threadKey,
   onClose,
+  onSent,
 }: Props) {
   const shownId = displayId ?? issueId;
-  const [text, setText] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const draftKey = toDraftKey(accountId, issueId);
+  // Pick up where the last box on this item left off.
+  const [text, setText] = useState(
+    () => useRepliesStore.getState().drafts[draftKey]?.text ?? "",
+  );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const getActionAccount = useAuthStore((s) => s.getActionAccount);
   const credentials = getActionAccount(accountId);
-  const refresh = useNotificationStore((s) => s.refresh);
   const markRead = useNotificationStore((s) => s.markRead);
+  const setDraft = useRepliesStore((s) => s.setDraft);
+  const clearDraft = useRepliesStore((s) => s.clearDraft);
+  const sendReply = useRepliesStore((s) => s.send);
 
   // @mention state
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -68,14 +79,45 @@ export function InlineReply({
   const [members, setMembers] = useState<AssigneeOption[]>([]);
   const [filtered, setFiltered] = useState<AssigneeOption[]>([]);
   /** People picked from the dropdown, so their IDs survive to send time. */
-  const [mentioned, setMentioned] = useState<AssigneeOption[]>([]);
+  const [mentioned, setMentioned] = useState<AssigneeOption[]>(
+    () => useRepliesStore.getState().drafts[draftKey]?.mentioned ?? [],
+  );
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    textareaRef.current?.focus();
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.focus();
+    // A restored draft resumes at its end.
+    ta.setSelectionRange(ta.value.length, ta.value.length);
   }, []);
+
+  // Drafts load from disk at startup; a box opened before that finishes
+  // picks its draft up once it arrives, unless typing has already begun.
+  const draftsLoaded = useRepliesStore((s) => s.loaded);
+  useEffect(() => {
+    if (!draftsLoaded || text) return;
+    const saved = useRepliesStore.getState().drafts[draftKey];
+    if (saved) {
+      setText(saved.text);
+      setMentioned(saved.mentioned);
+    }
+    // Once, when drafts arrive.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draftsLoaded]);
+
+  // Every keystroke is kept, so closing the box by accident loses nothing.
+  useEffect(() => {
+    setDraft(draftKey, text, mentioned);
+  }, [draftKey, text, mentioned, setDraft]);
+
+  /** Close and throw the draft away: the one deliberate way to discard it. */
+  const cancel = () => {
+    clearDraft(draftKey);
+    onClose();
+  };
 
   // Reply context: title, description snippet and headline fields.
   const detailsOpen = useUiPrefsStore((s) => s.replyDetailsOpen);
@@ -248,24 +290,25 @@ export function InlineReply({
     return out;
   };
 
-  const handleSubmit = async () => {
-    if (!text.trim() || !credentials || submitting) return;
+  const handleSubmit = () => {
+    const trimmed = text.trim();
+    if (!trimmed || !credentials) return;
 
-    setSubmitting(true);
-    try {
-      await postComment(credentials, issueId, serializeMentions(text.trim()));
-      showToast("success", isConversation ? `Text sent to ${shownId}` : `Comment posted on ${shownId}`);
-      if (activityId && !isRead) {
-        await markRead(activityId, accountId);
-      }
-      onClose();
-      await refresh();
-    } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      showToast("error", isConversation ? `Text not sent: ${reason}` : `Failed to comment: ${reason}`);
-    } finally {
-      setSubmitting(false);
-    }
+    // The reply shows in the thread straight away and reports its own
+    // progress there, so the box can close now.
+    sendReply({
+      threadKey,
+      draftKey,
+      credentials,
+      itemId: issueId,
+      text: trimmed,
+      body: serializeMentions(trimmed),
+      mentioned,
+      failureLabel: isConversation ? `Text not sent to ${shownId}` : `Comment not posted on ${shownId}`,
+    });
+    if (activityId && !isRead) void markRead(activityId, accountId);
+    onSent?.();
+    onClose();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -426,7 +469,6 @@ export function InlineReply({
           onKeyDown={handleKeyDown}
           placeholder={isConversation ? `Text ${shownId}...` : `Reply to ${shownId}...`}
           rows={3}
-          disabled={submitting}
           className="w-full text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-900 dark:text-gray-100 placeholder-gray-400 disabled:opacity-50"
         />
 
@@ -481,24 +523,24 @@ export function InlineReply({
       <div className="flex items-center justify-between mt-1.5">
         <span className="text-[10px] text-gray-400">
           {navigator.platform.includes("Mac") ? "\u2318" : "Ctrl"}+Enter to send
-          &middot; Esc to cancel
+          &middot; Esc to close, keeps draft
           {mentions && projectId && " \u00b7 @ to mention"}
           {isConversation && " \u00b7 sends via Quo API (uses credits)"}
         </span>
         <div className="flex gap-1.5">
           <button
-            onClick={onClose}
-            disabled={submitting}
-            className="text-[10px] px-2 py-0.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
+            onClick={cancel}
+            title="Discard this reply"
+            className="text-[10px] px-2 py-0.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={handleSubmit}
-            disabled={!text.trim() || submitting}
+            disabled={!text.trim()}
             className="text-[10px] px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50"
           >
-            {submitting ? "Sending..." : "Send"}
+            Send
           </button>
         </div>
       </div>
