@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "feedglance"
-version = "26.10.0"
+version = "26.10.1"
 dependencies = [
  "async-trait",
  "chrono",
