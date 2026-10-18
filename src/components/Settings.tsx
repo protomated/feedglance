@@ -188,7 +188,7 @@ export function Settings({ onClose, globalShortcut, onChangeShortcut, availableU
   };
 
   return (
-    <div className="p-3">
+    <div className="min-h-screen p-3 bg-gray-50 dark:bg-gray-900">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h2>
         <button
