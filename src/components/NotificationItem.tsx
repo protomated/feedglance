@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import type { ActivityItem } from "../types/activity";
 import { useFilterStore } from "../stores/filters";
 import { useNotificationStore, subjectKey } from "../stores/notifications";
+import { useRepliesStore } from "../stores/replies";
 import { useAuthStore } from "../stores/auth";
 import { InlineReply } from "./InlineReply";
 import { StatusDropdown } from "./StatusDropdown";
@@ -584,7 +585,12 @@ interface Props {
 }
 
 export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFocused, inThread = false, showAuthor = true, initialAction = null, isNew = false, onMarkRead, onOpenInBrowser }: Props) {
-  const [activeAction, setActiveAction] = useState<ActiveAction>(null);
+  const [menuAction, setActiveAction] = useState<ActiveAction>(null);
+  // The reply box lives in the store, so it outlasts this row unmounting.
+  const threadKey = subjectKey(activity);
+  const replyOpen = useRepliesStore((s) => s.openReplies[threadKey] === activity.id);
+  const setOpenReply = useRepliesStore((s) => s.setOpenReply);
+  const activeAction: ActiveAction = replyOpen ? "reply" : menuAction;
   const [commentExpanded, setCommentExpanded] = useState(false);
   const [commentOverflows, setCommentOverflows] = useState(false);
   const commentRef = useRef<HTMLParagraphElement>(null);
@@ -681,7 +687,9 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
       replyInProviderApp();
       return;
     }
-    setActiveAction((prev) => (prev === action ? null : action));
+    const closing = activeAction === action;
+    if (action === "reply" || replyOpen) setOpenReply(threadKey, action === "reply" && !closing ? activity.id : null);
+    setActiveAction(action === "reply" || closing ? null : action);
   };
 
   toggleActionRef.current = (action) => toggleAction(action);
@@ -963,8 +971,8 @@ export function NotificationItem({ activity, isRead, isJustRead, isPinned, isFoc
           isRead={isRead}
           mentions={capabilities.mentions}
           isConversation={isMessage}
-          threadKey={subjectKey(activity)}
-          onClose={() => setActiveAction(null)}
+          threadKey={threadKey}
+          onClose={() => setOpenReply(threadKey, null)}
         />
       )}
     </div>

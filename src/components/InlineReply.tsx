@@ -7,7 +7,7 @@ import {
   type ItemDetails,
 } from "../services/actions";
 import { useNotificationStore } from "../stores/notifications";
-import { draftKey as toDraftKey, useRepliesStore } from "../stores/replies";
+import { useRepliesStore } from "../stores/replies";
 import { useUiPrefsStore } from "../stores/uiPrefs";
 import { toPlainSnippet } from "../utils/plainText";
 import type { ThreadMessage } from "../services/actions";
@@ -60,7 +60,8 @@ export function InlineReply({
   onSent,
 }: Props) {
   const shownId = displayId ?? issueId;
-  const draftKey = toDraftKey(accountId, issueId);
+  // One draft per thread, so it survives new activity arriving on the issue.
+  const draftKey = threadKey;
   // Pick up where the last box on this item left off.
   const [text, setText] = useState(
     () => useRepliesStore.getState().drafts[draftKey]?.text ?? "",
@@ -86,13 +87,22 @@ export function InlineReply({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // Take focus on opening, and again whenever coming back to the window asks
+  // for this box. With several open, only the one last worked in takes it.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const resumeSeq = useRepliesStore((s) => s.resumeSeq);
+  const touchReply = useRepliesStore((s) => s.touchReply);
   useEffect(() => {
+    const active = useRepliesStore.getState().activeReply;
+    if (active && active !== threadKey) return;
     const ta = textareaRef.current;
     if (!ta) return;
-    ta.focus();
+    ta.focus({ preventScroll: true });
     // A restored draft resumes at its end.
     ta.setSelectionRange(ta.value.length, ta.value.length);
-  }, []);
+    rootRef.current?.scrollIntoView({ block: "nearest" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeSeq]);
 
   // Drafts load from disk at startup; a box opened before that finishes
   // picks its draft up once it arrives, unless typing has already begun.
@@ -353,7 +363,7 @@ export function InlineReply({
   );
 
   return (
-    <div className="px-3 py-2 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-100 dark:border-gray-700">
+    <div ref={rootRef} className="px-3 py-2 bg-gray-50 dark:bg-gray-800/50 border-t border-gray-100 dark:border-gray-700">
       {/* Context strip: what this reply is going to */}
       <div className="flex items-center gap-1.5 min-w-0 mb-1.5 text-[11px] text-gray-500 dark:text-gray-400">
         <span className="flex-shrink-0">Replying to</span>
@@ -467,6 +477,7 @@ export function InlineReply({
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onFocus={() => touchReply(threadKey)}
           placeholder={isConversation ? `Text ${shownId}...` : `Reply to ${shownId}...`}
           rows={3}
           className="w-full text-xs bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 text-gray-900 dark:text-gray-100 placeholder-gray-400 disabled:opacity-50"

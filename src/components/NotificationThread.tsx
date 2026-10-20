@@ -8,7 +8,6 @@ import { useFilterStore } from "../stores/filters";
 import { useNotificationStore } from "../stores/notifications";
 import {
   arrivedReplies,
-  draftKey as toDraftKey,
   useRepliesStore,
   type PendingReply,
 } from "../stores/replies";
@@ -73,7 +72,10 @@ export function NotificationThread({
   const latest = thread.activities[0];
   const isConversation = latest.kind === "message";
   const [showAll, setShowAll] = useState(false);
-  const [replying, setReplying] = useState(false);
+  // Open/closed lives in the store, so the box outlasts this row unmounting.
+  const replying = useRepliesStore((s) => s.openReplies[thread.key] === "thread");
+  const setOpenReply = useRepliesStore((s) => s.setOpenReply);
+  const setReplying = (open: boolean) => setOpenReply(thread.key, open ? "thread" : null);
   const [pendingAction, setPendingAction] = useState<ActiveAction>(null);
   // What was unread when the thread opened. Opening marks it all read, so this
   // is what keeps the new comments highlighted while you read them.
@@ -102,7 +104,7 @@ export function NotificationThread({
     loadDrafts();
   }, [loadDrafts]);
   const hasDraft = useRepliesStore(
-    (s) => !!actionItemId && !!s.drafts[toDraftKey(latest.accountId, actionItemId)],
+    (s) => !!s.drafts[thread.key],
   );
   const allPending = useRepliesStore((s) => s.pending);
   const settleReplies = useRepliesStore((s) => s.settle);
@@ -118,9 +120,12 @@ export function NotificationThread({
   const newestPending = shownPending[shownPending.length - 1];
   const unread = thread.activities.filter((a) => !readIds.has(a.id));
   // Only the Unread view drops read threads, so only there do they fade out.
+  // A thread you're replying in stays put: it's where your words are.
   const leaving =
     useFilterStore((s) => s.viewMode) === "unread" &&
     unread.length === 0 &&
+    !replying &&
+    !hasDraft &&
     thread.activities.some((a) => justReadIds.has(a.id));
   const replyExternally = capabilities.externalReply && !quoSendInApp && !!latest.url;
   const count = thread.activities.length;
@@ -187,7 +192,7 @@ export function NotificationThread({
       openUrl(latest.url!);
       return;
     }
-    setReplying((v) => !v);
+    setReplying(!replying);
   };
 
   const openSubject = (e: React.MouseEvent) => {

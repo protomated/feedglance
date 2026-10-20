@@ -56,8 +56,12 @@ export interface SendRequest {
   failureLabel: string;
 }
 
-/** The draft key for one item on one account. */
-export function draftKey(accountId: string | undefined, itemId: string): string {
+/**
+ * How drafts used to be keyed: by the activity's item, which changed whenever
+ * new activity arrived on the issue. Drafts are now keyed by thread (issue);
+ * old ones are moved over by {@link RepliesState.adoptDrafts}.
+ */
+export function legacyDraftKey(accountId: string | undefined, itemId: string): string {
   return `${accountId ?? ""}:${itemId}`;
 }
 
@@ -86,12 +90,39 @@ function persistDrafts(drafts: Record<string, Draft>) {
 /** What a retry needs that doesn't belong in rendered state (the token). */
 const requests = new Map<string, SendRequest>();
 
+/**
+ * Who shows a thread's open reply box: the thread row itself, or one activity
+ * row inside it (by activity ID).
+ */
+export type ReplyOwner = "thread" | string;
+
 interface RepliesState {
   drafts: Record<string, Draft>;
   pending: PendingReply[];
   loaded: boolean;
+  /**
+   * Open reply boxes by thread key. Kept here rather than in the rows so a box
+   * survives its row unmounting, e.g. the window hiding on blur.
+   */
+  openReplies: Record<string, ReplyOwner>;
+  /** The thread whose box was last opened or focused: where coming back lands. */
+  activeReply: string | null;
+  /** Bumped to ask the active box to scroll into view and take focus. */
+  resumeSeq: number;
   load: () => Promise<void>;
+  /** Open (owner) or close (null) a thread's reply box. */
+  setOpenReply: (threadKey: string, owner: ReplyOwner | null) => void;
+  /** Mark a thread's box as the one being worked in. */
+  touchReply: (threadKey: string) => void;
+  /**
+   * Bring a reply box back: the given thread's (opening it if closed), or
+   * the active one if still open.
+   */
+  resume: (threadKey?: string) => void;
+  /** Drafts are keyed by thread key. */
   setDraft: (key: string, text: string, mentioned: AssigneeOption[]) => void;
+  /** Move drafts from old keys to thread keys, as `{ [oldKey]: threadKey }`. */
+  adoptDrafts: (moves: Record<string, string>) => void;
   clearDraft: (key: string) => void;
   send: (req: SendRequest) => void;
   retry: (id: string) => void;
@@ -131,6 +162,38 @@ export const useRepliesStore = create<RepliesState>((set, get) => {
     drafts: {},
     pending: [],
     loaded: false,
+    openReplies: {},
+    activeReply: null,
+    resumeSeq: 0,
+
+    setOpenReply: (threadKey, owner) => {
+      const openReplies = { ...get().openReplies };
+      if (owner) {
+        openReplies[threadKey] = owner;
+        set({ openReplies, activeReply: threadKey });
+      } else {
+        if (!(threadKey in openReplies)) return;
+        delete openReplies[threadKey];
+        const activeReply = get().activeReply === threadKey ? null : get().activeReply;
+        set({ openReplies, activeReply });
+      }
+    },
+
+    touchReply: (threadKey) => {
+      if (get().activeReply !== threadKey) set({ activeReply: threadKey });
+    },
+
+    resume: (threadKey) => {
+      if (threadKey) {
+        if (!get().openReplies[threadKey]) {
+          set({ openReplies: { ...get().openReplies, [threadKey]: "thread" } });
+        }
+        set({ activeReply: threadKey, resumeSeq: get().resumeSeq + 1 });
+        return;
+      }
+      const active = get().activeReply;
+      if (active && get().openReplies[active]) set({ resumeSeq: get().resumeSeq + 1 });
+    },
 
     load: async () => {
       if (get().loaded) return;
@@ -160,6 +223,22 @@ export const useRepliesStore = create<RepliesState>((set, get) => {
       } else {
         return;
       }
+      set({ drafts });
+      persistDrafts(drafts);
+    },
+
+    adoptDrafts: (moves) => {
+      const drafts = { ...get().drafts };
+      let changed = false;
+      for (const [from, to] of Object.entries(moves)) {
+        const draft = drafts[from];
+        if (!draft || from === to) continue;
+        // Never overwrite a draft already on the thread.
+        if (!drafts[to]) drafts[to] = draft;
+        delete drafts[from];
+        changed = true;
+      }
+      if (!changed) return;
       set({ drafts });
       persistDrafts(drafts);
     },

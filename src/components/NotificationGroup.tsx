@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { NotificationGroup as GroupType } from "../types/activity";
 import { threadActivities } from "../stores/notifications";
+import { useRepliesStore } from "../stores/replies";
 import { NotificationThread } from "./NotificationThread";
 
 /**
@@ -56,6 +57,14 @@ export function NotificationGroup({
     () => threadActivities(group.activities, readIds),
     [group.activities, readIds],
   );
+  // Coming back to a reply box in this group: open the group so it can show.
+  const resumeSeq = useRepliesStore((s) => s.resumeSeq);
+  useEffect(() => {
+    const active = useRepliesStore.getState().activeReply;
+    if (active && threads.some((t) => t.key === active)) setExpanded(true);
+    // Only on a resume request, not whenever the threads change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeSeq]);
   const link = groupLink(group);
   const allTexts = group.activities.every((a) => a.kind === "message");
   const newThreads = threads.filter((t) => t.hasUnread).length;

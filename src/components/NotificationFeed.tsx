@@ -7,9 +7,12 @@ import {
 } from "../stores/notifications";
 import { useFilterStore } from "../stores/filters";
 import { useAuthStore } from "../stores/auth";
+import { legacyDraftKey, useRepliesStore } from "../stores/replies";
 import { NotificationGroup } from "./NotificationGroup";
 import { FilterBar } from "./FilterBar";
 import { EmptyState } from "./EmptyState";
+import { DraftsStrip, type DraftThread } from "./DraftsStrip";
+import { resolveActionItemId, resolveIssueId, targetLabel } from "./NotificationItem";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ActivityItem } from "../types/activity";
 import { passesKindFilter, passesProjectFilter } from "../utils/projectFilter";
@@ -127,7 +130,10 @@ export function NotificationFeed({ focusedActivityId }: Props) {
   useEffect(() => {
     const onBlur = () => {
       clearAllSticky();
-      setOpenThreads(new Set());
+      // Threads with a reply box open stay open: clicking away to look
+      // something up shouldn't lose your place.
+      const replying = useRepliesStore.getState().openReplies;
+      setOpenThreads((prev) => new Set([...prev].filter((key) => key in replying)));
     };
     window.addEventListener("blur", onBlur);
     return () => {
@@ -179,6 +185,14 @@ export function NotificationFeed({ focusedActivityId }: Props) {
     });
   };
 
+  // Coming back to a reply box inside a thread: reopen the thread it sits in.
+  const resumeSeq = useRepliesStore((s) => s.resumeSeq);
+  useEffect(() => {
+    const { activeReply, openReplies } = useRepliesStore.getState();
+    if (!activeReply || openReplies[activeReply] === "thread") return;
+    setOpenThreads((prev) => (prev.has(activeReply) ? prev : new Set(prev).add(activeReply)));
+  }, [resumeSeq]);
+
   /** Toggle an activity's read state. Unread → read (with 5s sticky). Read → unread (instant). */
   const handleToggleRead = (activityId: string) => {
     const isCurrentlyRead = readIds.has(activityId);
@@ -210,6 +224,48 @@ export function NotificationFeed({ focusedActivityId }: Props) {
     return map;
   }, [accounts]);
 
+  // Threads you're replying in or have an unsent draft on. They stay in the
+  // feed whatever the view or filters say: hiding them is how drafts got lost.
+  const drafts = useRepliesStore((s) => s.drafts);
+  const openReplies = useRepliesStore((s) => s.openReplies);
+  const { replyThreads, draftThreads } = useMemo(() => {
+    const keys = new Set<string>();
+    const withDraft = new Map<string, DraftThread>();
+    for (const a of activities) {
+      const key = subjectKey(a);
+      if (key in openReplies) keys.add(key);
+      if (withDraft.has(key)) continue;
+      const draft = drafts[key];
+      if (!draft) continue;
+      keys.add(key);
+      const label = targetLabel(a);
+      withDraft.set(key, {
+        threadKey: key,
+        label: label?.label ?? "Untitled",
+        title: label?.title,
+        text: draft.text,
+        updatedAt: draft.updatedAt,
+      });
+    }
+    return { replyThreads: keys, draftThreads: [...withDraft.values()] };
+  }, [activities, drafts, openReplies]);
+
+  // Drafts saved before they were keyed by thread: only the feed knows which
+  // thread an old item key belongs to, so it moves them over.
+  const draftsLoaded = useRepliesStore((s) => s.loaded);
+  const adoptDrafts = useRepliesStore((s) => s.adoptDrafts);
+  useEffect(() => {
+    if (!draftsLoaded) return;
+    const moves: Record<string, string> = {};
+    for (const a of activities) {
+      const itemId = resolveActionItemId(a) ?? resolveIssueId(a);
+      if (!itemId) continue;
+      const legacy = legacyDraftKey(a.accountId, itemId);
+      if (drafts[legacy] && !(legacy in moves)) moves[legacy] = subjectKey(a);
+    }
+    adoptDrafts(moves);
+  }, [draftsLoaded, activities, drafts, adoptDrafts]);
+
   // Apply filters client-side before grouping
   const filteredActivities = useMemo(() => {
     return dropLoneOwnActivities(activities.filter((a) => {
@@ -218,6 +274,8 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       // so hiding them here makes the feed disagree with the source of truth.
       // Your own comments (`isMine`) stay, to give their threads context.
       if (currentUserId && a.author?.id === currentUserId && !a.mentionsMe && !a.isMine) return false;
+
+      if (replyThreads.has(subjectKey(a))) return true;
 
       // Account filter
       if (selectedAccounts.size > 0 && a.accountId) {
@@ -252,7 +310,7 @@ export function NotificationFeed({ focusedActivityId }: Props) {
 
       return true;
     }));
-  }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers]);
+  }, [activities, currentUserId, selectedAccounts, selectedProjects, selectedTypes, mutedIssues, searchQuery, assignedToMeOnly, accountUsers, replyThreads]);
 
   // Counts are per thread, matching the one-row-per-issue feed and the tray.
   const { unreadCount, readCount, liveSubjects, pinnedSubjects } = useMemo(() => {
@@ -268,13 +326,14 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       if (pinnedIds.has(a.id)) pinned.add(key);
     }
     for (const key of openThreads) live.add(key);
+    for (const key of replyThreads) live.add(key);
     return {
       unreadCount: unread.size,
       readCount: all.size - unread.size,
       liveSubjects: live,
       pinnedSubjects: pinned,
     };
-  }, [filteredActivities, readIds, justReadIds, pinnedIds, openThreads]);
+  }, [filteredActivities, readIds, justReadIds, pinnedIds, openThreads, replyThreads]);
 
   // Visibility is decided per thread, not per activity: a thread with anything
   // new shows with its full history, so the row can say "+4" and open onto the
@@ -285,10 +344,19 @@ export function NotificationFeed({ focusedActivityId }: Props) {
       result = result.filter((a) => liveSubjects.has(subjectKey(a)));
     }
     if (showPinnedOnly) {
-      result = result.filter((a) => pinnedSubjects.has(subjectKey(a)));
+      result = result.filter((a) => {
+        const key = subjectKey(a);
+        return pinnedSubjects.has(key) || replyThreads.has(key);
+      });
     }
     return result;
-  }, [filteredActivities, liveSubjects, pinnedSubjects, viewMode, showPinnedOnly]);
+  }, [filteredActivities, liveSubjects, pinnedSubjects, viewMode, showPinnedOnly, replyThreads]);
+
+  // Drafts whose box is closed; an open box is already on screen.
+  const closedDrafts = draftThreads
+    .filter((d) => !(d.threadKey in openReplies))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const resumeReply = useRepliesStore((s) => s.resume);
 
   const pinnedCount = filteredActivities.filter((a) => pinnedIds.has(a.id)).length;
   const groups = groupActivities(visibleActivities, readIds);
@@ -395,6 +463,10 @@ export function NotificationFeed({ focusedActivityId }: Props) {
             </button>
           )}
         </div>
+      )}
+
+      {closedDrafts.length > 0 && (
+        <DraftsStrip drafts={closedDrafts} onOpen={resumeReply} />
       )}
 
       {/* Scrollable feed */}

@@ -13,6 +13,7 @@ import {
   threadActivities,
 } from "./stores/notifications";
 import { useFilterStore } from "./stores/filters";
+import { useRepliesStore } from "./stores/replies";
 import { useKeyboardNavigation } from "./hooks/useKeyboardNavigation";
 import { Onboarding } from "./components/Onboarding";
 import { Settings } from "./components/Settings";
@@ -401,6 +402,8 @@ function App() {
 
     const handleFocus = () => {
       setFocusState("focused");
+      // Land back in the reply you were writing before clicking away.
+      useRepliesStore.getState().resume();
     };
 
     // Promotion to the idle tier is the backend's job. This used to arm a
